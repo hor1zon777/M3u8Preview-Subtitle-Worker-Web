@@ -13,6 +13,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
 
 // FlacFetchResult 下载完成后的元数据。
@@ -29,6 +32,8 @@ func DownloadAndVerify(body io.Reader, workDir string, expectedSha string, expec
 		return nil, fmt.Errorf("mkdir workdir: %w", err)
 	}
 	flacPath := filepath.Join(workDir, "audio.flac")
+	logger.Debug("[audio] downloading FLAC → %s (expectSize=%d expectSha=%s)",
+		flacPath, expectedSize, truncStr(expectedSha, 12))
 	f, err := os.Create(flacPath)
 	if err != nil {
 		return nil, fmt.Errorf("create flac: %w", err)
@@ -37,6 +42,7 @@ func DownloadAndVerify(body io.Reader, workDir string, expectedSha string, expec
 
 	hasher := sha256.New()
 	w := io.MultiWriter(f, hasher)
+	start := time.Now()
 	n, err := io.Copy(w, body)
 	if err != nil {
 		_ = os.Remove(flacPath)
@@ -57,9 +63,19 @@ func DownloadAndVerify(body io.Reader, workDir string, expectedSha string, expec
 		_ = os.Remove(flacPath)
 		return nil, fmt.Errorf("FLAC size mismatch: expect %d got %d", expectedSize, n)
 	}
+	dur := time.Since(start)
+	mbps := float64(n) / 1024 / 1024 / dur.Seconds()
+	logger.Debug("[audio] FLAC downloaded: %d bytes in %s (%.2f MB/s) sha=%s…", n, dur, mbps, sha[:12])
 	return &FlacFetchResult{
 		FlacPath: flacPath,
 		Size:     n,
 		Sha256:   sha,
 	}, nil
+}
+
+func truncStr(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

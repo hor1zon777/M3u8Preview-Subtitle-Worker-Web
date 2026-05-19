@@ -75,6 +75,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir workdir: %w", err)
 	}
+	logger.Debug("[worker] [job %s] workDir=%s", job.JobID, workDir)
 
 	displayName := deriveDisplayName(job)
 	state := r.deps.State
@@ -151,6 +152,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 
 	// ---- 1. 拉 FLAC ----
 	logger.Info("[worker] [job %s] pulling FLAC ...", job.JobID)
+	t0 := time.Now()
 	fetch, err := r.deps.Client.AudioFetch(ctx, job.AudioArtifactURL, r.deps.WorkerID)
 	if err != nil {
 		return err
@@ -161,17 +163,20 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 		return err
 	}
 	logger.Info("[worker] FLAC downloaded: %d bytes, sha=%s…", flac.Size, flac.Sha256[:12])
+	logger.Debug("[worker] [job %s] FLAC stage took=%s", job.JobID, time.Since(t0))
 	if err := r.reportPhase(ctx, job.JobID, "asr", 25); err != nil {
 		return err
 	}
 
 	// ---- 2. ffmpeg 解码 ----
 	logger.Info("[worker] [job %s] decoding FLAC -> WAV ...", job.JobID)
+	t1 := time.Now()
 	settings := r.deps.GetSettings()
 	wavPath, err := audio.DecodeFlacToWav(ctx, settings.FFmpegPath, flac.FlacPath, workDir)
 	if err != nil {
 		return err
 	}
+	logger.Debug("[worker] [job %s] FFmpeg decode took=%s wav=%s", job.JobID, time.Since(t1), wavPath)
 	if err := r.reportPhase(ctx, job.JobID, "asr", 40); err != nil {
 		return err
 	}
@@ -183,7 +188,9 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	logger.Info("[worker] [job %s] running ASR ...", job.JobID)
 
 	state.EnterAsrQ()
+	logger.Debug("[worker:asr-lock] queueing job %s", job.JobID)
 	AcquireASR()
+	logger.Debug("[worker:asr-lock] acquired by job %s", job.JobID)
 	state.EnterAsrRun()
 	asrStarted := time.Now()
 	runner := &asr.WhisperRunner{Settings: settings}
@@ -212,6 +219,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	if asrErr != nil {
 		return asrErr
 	}
+	logger.Debug("[worker] [job %s] ASR stage took=%s srt=%s", job.JobID, time.Since(asrStarted), srtPath)
 	if err := r.reportPhase(ctx, job.JobID, "asr", 75); err != nil {
 		return err
 	}
@@ -226,6 +234,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 			job.JobID, worker.TranslateProviderID,
 			firstNonEmpty(job.SourceLang, worker.SourceLanguage, "auto"),
 			firstNonEmpty(job.TargetLang, worker.TargetLanguage))
+		tTranslate := time.Now()
 		translated, terr := r.deps.Translate(ctx, srtPath, worker.TranslateProviderID,
 			firstNonEmpty(job.SourceLang, worker.SourceLanguage, "auto"),
 			firstNonEmpty(job.TargetLang, worker.TargetLanguage),
@@ -240,6 +249,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 		if terr != nil {
 			return terr
 		}
+		logger.Debug("[worker] [job %s] translate stage took=%s out=%s", job.JobID, time.Since(tTranslate), translated)
 		finalSrtPath = translated
 		didTranslate = true
 	} else {
@@ -255,6 +265,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 
 	// ---- 5. SRT → VTT + 上传 ----
 	logger.Info("[worker] [job %s] uploading VTT ...", job.JobID)
+	tUpload := time.Now()
 	state.SetCategory(job.JobID, "upload")
 	vtt, err := asr.SrtFileToVTT(finalSrtPath)
 	if err != nil {
@@ -263,6 +274,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	hasher := sha256.New()
 	hasher.Write(vtt)
 	sha := hex.EncodeToString(hasher.Sum(nil))
+	logger.Debug("[worker] [job %s] VTT size=%d sha=%s…", job.JobID, len(vtt), sha[:12])
 	completeCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if err := r.deps.Client.Complete(completeCtx, job.JobID, broker.CompleteMeta{
@@ -276,6 +288,8 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	state.RecordSuccess()
 	finalStage = "completed"
 	logger.Info("[worker] [job %s] DONE (translated=%v)", job.JobID, didTranslate)
+	logger.Debug("[worker] [job %s] upload stage took=%s total=%s",
+		job.JobID, time.Since(tUpload), time.Since(t0))
 	return nil
 }
 

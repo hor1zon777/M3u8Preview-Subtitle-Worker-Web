@@ -98,12 +98,15 @@ func (p *Poller) loop() {
 	baseInterval := time.Duration(max(1, pollSec)) * time.Second
 	backoff := time.Duration(max(1, backoffSec)) * time.Second
 	maxBackoff := 60 * time.Second
+	logger.Debug("[worker:poll] loop start (pollInterval=%s baseBackoff=%s maxBackoff=%s waitSec=%d)",
+		baseInterval, backoff, maxBackoff, claimWaitSec)
 
 	for {
 		if p.ctx.Err() != nil {
 			return
 		}
 		if !p.state.CanClaimNew() {
+			logger.Debug("[worker:poll] cannot claim new (concurrency saturated), sleeping 1s")
 			if sleepCtx(p.ctx, time.Second) != nil {
 				return
 			}
@@ -111,14 +114,19 @@ func (p *Poller) loop() {
 		}
 
 		// long-poll claim
+		logger.Debug("[worker:poll] claim start (waitSec=%d)", claimWaitSec)
+		claimStart := time.Now()
 		claimCtx, claimCancel := context.WithCancel(p.ctx)
 		job, err := p.client.Claim(claimCtx, p.workerID, claimWaitSec)
 		claimCancel()
+		logger.Debug("[worker:poll] claim returned (took=%s, err=%v, job=%v)",
+			time.Since(claimStart), err, job != nil)
 		if err != nil {
 			if p.ctx.Err() != nil {
 				return
 			}
 			logger.Warn("[worker:poll] claim error: %v", err)
+			logger.Debug("[worker:poll] backing off for %s", backoff)
 			if sleepCtx(p.ctx, backoff) != nil {
 				return
 			}
@@ -128,6 +136,7 @@ func (p *Poller) loop() {
 		backoff = time.Duration(max(1, backoffSec)) * time.Second
 
 		if job == nil {
+			logger.Debug("[worker:poll] no job; sleeping baseInterval=%s", baseInterval)
 			if sleepCtx(p.ctx, baseInterval) != nil {
 				return
 			}
@@ -142,6 +151,9 @@ func (p *Poller) loop() {
 				}
 				return ""
 			}())
+		logger.Debug("[worker:poll] job detail: audioUrl=%s size=%d sha=%s… sourceLang=%s targetLang=%s",
+			job.AudioArtifactURL, job.AudioArtifactSize, truncStr(job.AudioArtifactSha256, 12),
+			job.SourceLang, job.TargetLang)
 
 		// fire-and-forget runJob
 		p.inflightWG.Add(1)
@@ -200,4 +212,11 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+func truncStr(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

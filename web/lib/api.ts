@@ -85,6 +85,7 @@ export interface SystemSettings {
   vadMaxSpeechDuration: number;
   vadSpeechPad: number;
   vadSamplesOverlap: number;
+  debug: boolean;
 }
 
 export interface Provider {

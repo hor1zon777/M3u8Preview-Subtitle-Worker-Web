@@ -75,6 +75,7 @@ func (h *Heartbeater) loop() {
 
 func (h *Heartbeater) tick() {
 	snap := h.state.Snapshot()
+	logger.Debug("[worker:hb] tick: jobs=%d", len(snap.CurrentJobs))
 	for _, j := range snap.CurrentJobs {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err := h.client.Heartbeat(ctx, j.JobID, h.workerID, j.Stage, j.Progress)

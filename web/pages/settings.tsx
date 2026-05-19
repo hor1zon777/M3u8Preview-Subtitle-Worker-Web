@@ -14,7 +14,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { toast } from 'sonner';
-import { Settings as SettingsIcon, KeyRound } from 'lucide-react';
+import { Settings as SettingsIcon, KeyRound, Bug } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { api, SystemSettings, setAuthToken } from '../lib/api';
 
@@ -32,6 +32,7 @@ const DEFAULT: SystemSettings = {
   vadMaxSpeechDuration: 0,
   vadSpeechPad: 30,
   vadSamplesOverlap: 0.1,
+  debug: false,
 };
 
 export default function SettingsPage() {
@@ -202,6 +203,27 @@ export default function SettingsPage() {
                 onChange={(v) => update('vadSamplesOverlap', v)} step={0.05} min={0} max={1} />
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 调试 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Bug className="size-4" /> 调试模式
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-3">
+            <Switch checked={s.debug} onCheckedChange={(v) => update('debug', v)} id="debug" />
+            <Label htmlFor="debug" className="text-sm">
+              输出每一步骤的详细日志（poll / claim / 下载 / ffmpeg / whisper / 翻译 / 上传 / 心跳）
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            开启后会增加日志量，建议仅在排查问题时启用。生效是立即的，无需重启 worker。
+            日志输出到 stderr 与 WebSocket 实时推送通道，前端 LogEntry.type 会包含 <code>debug</code>。
+          </p>
         </CardContent>
       </Card>
 

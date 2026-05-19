@@ -18,7 +18,7 @@ export interface ModelProgressEvent {
 export interface LogEntry {
   timestamp: number;
   message: string;
-  type: 'info' | 'warning' | 'error';
+  type: 'debug' | 'info' | 'warning' | 'error';
 }
 
 type Listeners = {

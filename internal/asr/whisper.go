@@ -28,8 +28,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
 
 // WhisperOptions 单次 whisper 运行的参数。
@@ -67,6 +69,11 @@ func (w *WhisperRunner) detectEngine() bool {
 	}
 	is := isScriptFile(cli)
 	w.isPythonWrap = &is
+	if is {
+		logger.Debug("[whisper] engine = python wrapper (script detected at %s)", cli)
+	} else {
+		logger.Debug("[whisper] engine = native whisper-cli (binary at %s)", cli)
+	}
 	return is
 }
 
@@ -145,6 +152,8 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 	}
 
 	cmd := exec.CommandContext(ctx, w.Settings.WhisperCliPath, args...)
+	logger.Debug("[whisper] exec %s %s", w.Settings.WhisperCliPath, strings.Join(args, " "))
+	start := time.Now()
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return "", fmt.Errorf("whisper stderr pipe: %w", err)
@@ -164,6 +173,7 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 	if err := cmd.Wait(); err != nil {
 		return "", fmt.Errorf("whisper exit: %w; stderr: %s", err, stderrTail.String())
 	}
+	logger.Debug("[whisper] exec done in %s", time.Since(start))
 
 	st, err := os.Stat(srtPath)
 	if err != nil {
@@ -187,9 +197,14 @@ func scanStderrProgress(r io.Reader, onProgress ProgressFn, tail *ring) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*64), 1024*1024)
 	lastPct := -1
+	debugOn := logger.IsDebug()
 	for scanner.Scan() {
 		line := scanner.Text()
 		tail.Write([]byte(line + "\n"))
+		if debugOn && line != "" {
+			// 仅在 debug 模式输出 whisper stderr 行；进度行另外抽出更易读的标签
+			logger.Debug("[whisper:stderr] %s", line)
+		}
 		if onProgress == nil {
 			continue
 		}

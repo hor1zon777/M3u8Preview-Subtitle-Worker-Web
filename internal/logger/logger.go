@@ -1,9 +1,10 @@
 // Package logger 提供进程级日志记录 + 内存环形缓冲区 + 订阅广播。
 //
 // 设计：
-//   - 主进程通过 logger.Info/Warn/Error 写日志，输出到 stderr 并落入环形缓冲区
+//   - 主进程通过 logger.Info/Warn/Error/Debug 写日志，输出到 stderr 并落入环形缓冲区
 //   - Web 层订阅 Subscribe() 拿到 channel，每条新日志推过来 → WebSocket 转发到浏览器
 //   - 环形缓冲区容量 1000 条，超出按 FIFO 丢最旧
+//   - Debug 级别受全局开关控制：关闭时 Debug() 直接 no-op，避免噪音与内存浪费
 //
 // 与原 helpers/logger.ts 行为对齐：UI 上有"最近日志"列表 + 错误显示。
 package logger
@@ -12,13 +13,15 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Level 日志级别。和原 SmartSub 的 'info' | 'warning' | 'error' 对齐。
+// Level 日志级别。和原 SmartSub 的 'info' | 'warning' | 'error' 对齐，并扩展 'debug'。
 type Level string
 
 const (
+	LevelDebug   Level = "debug"
 	LevelInfo    Level = "info"
 	LevelWarning Level = "warning"
 	LevelError   Level = "error"
@@ -37,10 +40,33 @@ var (
 	mu          sync.Mutex
 	ring        = make([]Entry, 0, ringCapacity)
 	subscribers = map[chan Entry]struct{}{}
+
+	// debugEnabled 控制 Debug 级别是否实际输出。原子读写避免每次日志都拿锁。
+	debugEnabled atomic.Bool
 )
 
-// Log 写一条日志。
+// SetDebug 切换全局 Debug 开关。配置加载或保存时调用。
+func SetDebug(enabled bool) {
+	prev := debugEnabled.Swap(enabled)
+	if prev == enabled {
+		return
+	}
+	// 开关变化本身记一条 info 方便排查"为什么没看到 debug 日志"
+	if enabled {
+		Info("[logger] debug mode enabled")
+	} else {
+		Info("[logger] debug mode disabled")
+	}
+}
+
+// IsDebug 是否启用 Debug 输出。
+func IsDebug() bool { return debugEnabled.Load() }
+
+// Log 写一条日志。Debug 级别在开关关闭时被丢弃。
 func Log(level Level, format string, args ...any) {
+	if level == LevelDebug && !debugEnabled.Load() {
+		return
+	}
 	msg := fmt.Sprintf(format, args...)
 	entry := Entry{
 		Timestamp: time.Now().UnixMilli(),
@@ -71,7 +97,8 @@ func Log(level Level, format string, args ...any) {
 	}
 }
 
-// Info Warn Error 是 Log 的便捷封装。
+// Debug Info Warn Error 是 Log 的便捷封装。
+func Debug(format string, args ...any) { Log(LevelDebug, format, args...) }
 func Info(format string, args ...any)  { Log(LevelInfo, format, args...) }
 func Warn(format string, args ...any)  { Log(LevelWarning, format, args...) }
 func Error(format string, args ...any) { Log(LevelError, format, args...) }

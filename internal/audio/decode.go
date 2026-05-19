@@ -13,12 +13,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
 
 // DecodeFlacToWav 用 ffmpeg 把 flacPath 转成 workDir/audio.wav。
 func DecodeFlacToWav(ctx context.Context, ffmpegPath, flacPath, workDir string) (string, error) {
 	wavPath := filepath.Join(workDir, "audio.wav")
 	if s, err := os.Stat(wavPath); err == nil && s.Size() > 0 {
+		logger.Debug("[audio] WAV already exists, skipping ffmpeg: %s (%d bytes)", wavPath, s.Size())
 		return wavPath, nil
 	}
 	args := []string{
@@ -30,6 +35,8 @@ func DecodeFlacToWav(ctx context.Context, ffmpegPath, flacPath, workDir string) 
 		"-c:a", "pcm_s16le",
 		wavPath,
 	}
+	logger.Debug("[audio] ffmpeg %s %s", ffmpegPath, strings.Join(args, " "))
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -49,5 +56,7 @@ func DecodeFlacToWav(ctx context.Context, ffmpegPath, flacPath, workDir string) 
 	if s, err := os.Stat(wavPath); err != nil || s.Size() == 0 {
 		return "", fmt.Errorf("ffmpeg succeeded but wav is empty: %s", wavPath)
 	}
+	wavStat, _ := os.Stat(wavPath)
+	logger.Debug("[audio] ffmpeg done in %s, wav=%d bytes", time.Since(start), wavStat.Size())
 	return wavPath, nil
 }

@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
 
 // Client 与服务端的 HTTP 会话。线程安全：底层 http.Client 自带连接池。
@@ -48,15 +50,19 @@ func New(baseURL, token string, verifyTLS bool) (*Client, error) {
 
 // Ping GET /healthz —— "测试连接"按钮用。
 func (c *Client) Ping(ctx context.Context) error {
+	logger.Debug("[broker] GET %s/healthz", c.baseURL)
+	start := time.Now()
 	req, err := c.newReq(ctx, http.MethodGet, "/healthz", nil)
 	if err != nil {
 		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		logger.Debug("[broker] ping error: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	logger.Debug("[broker] ping → HTTP %d (took=%s)", resp.StatusCode, time.Since(start))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("ping 失败: HTTP %d", resp.StatusCode)
 	}
@@ -74,16 +80,20 @@ type RegisterRequest struct {
 
 // Register 注册 worker，返回服务端响应。
 func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterResponse, error) {
+	logger.Debug("[broker] POST /api/v1/worker/register workerId=%s caps=%v", req.WorkerID, req.Capabilities)
+	start := time.Now()
 	r, err := c.newJSONReq(ctx, http.MethodPost, "/api/v1/worker/register", req)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.http.Do(r)
 	if err != nil {
+		logger.Debug("[broker] register error: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	logger.Debug("[broker] register → HTTP %d (took=%s, bytes=%d)", resp.StatusCode, time.Since(start), len(body))
 	if resp.StatusCode == http.StatusGone {
 		return nil, ErrJobLost
 	}
@@ -107,6 +117,8 @@ func (c *Client) Claim(ctx context.Context, workerID string, waitSec int) (*Clai
 	if waitSec > 0 {
 		timeout = time.Duration(waitSec+5) * time.Second
 	}
+	logger.Debug("[broker] POST /api/v1/worker/claim workerId=%s waitSec=%d timeout=%s", workerID, waitSec, timeout)
+	start := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -117,13 +129,16 @@ func (c *Client) Claim(ctx context.Context, workerID string, waitSec int) (*Clai
 	}
 	resp, err := c.http.Do(r)
 	if err != nil {
+		logger.Debug("[broker] claim error: %v (took=%s)", err, time.Since(start))
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNoContent {
+		logger.Debug("[broker] claim → 204 (no job, took=%s)", time.Since(start))
 		return nil, nil // 无任务
 	}
 	respBody, _ := io.ReadAll(resp.Body)
+	logger.Debug("[broker] claim → HTTP %d (took=%s, bytes=%d)", resp.StatusCode, time.Since(start), len(respBody))
 	if resp.StatusCode == http.StatusGone {
 		return nil, ErrJobLost
 	}
@@ -161,17 +176,21 @@ func (c *Client) Deregister(ctx context.Context, workerID string) error {
 
 // Heartbeat 上报当前任务的 stage / progress。410 Gone → ErrJobLost。
 func (c *Client) Heartbeat(ctx context.Context, jobID, workerID, stage string, progress int) error {
+	logger.Debug("[broker] POST /jobs/%s/heartbeat stage=%s progress=%d%%", jobID, stage, progress)
 	body := map[string]any{"workerId": workerID, "stage": stage, "progress": progress}
 	path := "/api/v1/worker/jobs/" + url.PathEscape(jobID) + "/heartbeat"
 	r, err := c.newJSONReq(ctx, http.MethodPost, path, body)
 	if err != nil {
 		return err
 	}
+	start := time.Now()
 	resp, err := c.http.Do(r)
 	if err != nil {
+		logger.Debug("[broker] heartbeat error: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	logger.Debug("[broker] heartbeat → HTTP %d (took=%s)", resp.StatusCode, time.Since(start))
 	if resp.StatusCode == http.StatusGone {
 		return ErrJobLost
 	}
@@ -183,17 +202,21 @@ func (c *Client) Fail(ctx context.Context, jobID, workerID, errMsg string, kind 
 	if len(errMsg) > 2000 {
 		errMsg = errMsg[:2000]
 	}
+	logger.Debug("[broker] POST /jobs/%s/fail kind=%s msgLen=%d", jobID, kind, len(errMsg))
 	body := map[string]any{"workerId": workerID, "errorMsg": errMsg, "errorKind": string(kind)}
 	path := "/api/v1/worker/jobs/" + url.PathEscape(jobID) + "/fail"
 	r, err := c.newJSONReq(ctx, http.MethodPost, path, body)
 	if err != nil {
 		return err
 	}
+	start := time.Now()
 	resp, err := c.http.Do(r)
 	if err != nil {
+		logger.Debug("[broker] fail error: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	logger.Debug("[broker] fail → HTTP %d (took=%s)", resp.StatusCode, time.Since(start))
 	return expectSuccess(resp, "fail")
 }
 
@@ -229,6 +252,7 @@ func (c *Client) Complete(ctx context.Context, jobID string, meta CompleteMeta, 
 	}
 
 	path := "/api/v1/worker/jobs/" + url.PathEscape(jobID) + "/complete"
+	logger.Debug("[broker] POST %s vttSize=%d sha=%s…", path, len(vttData), truncate(meta.Sha256, 12))
 	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+path, &buf)
@@ -238,11 +262,14 @@ func (c *Client) Complete(ctx context.Context, jobID string, meta CompleteMeta, 
 	c.applyHeaders(req)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		logger.Debug("[broker] complete error: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	logger.Debug("[broker] complete → HTTP %d (took=%s)", resp.StatusCode, time.Since(start))
 	if resp.StatusCode == http.StatusGone {
 		return ErrJobLost
 	}
@@ -262,6 +289,7 @@ type AudioFetchResult struct {
 func (c *Client) AudioFetch(ctx context.Context, audioURL, workerID string) (*AudioFetchResult, error) {
 	resolved := c.resolveURL(audioURL)
 	resolved = appendQuery(resolved, "workerId", workerID)
+	logger.Debug("[broker] GET %s (audio fetch)", resolved)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, resolved, nil)
@@ -273,11 +301,15 @@ func (c *Client) AudioFetch(ctx context.Context, audioURL, workerID string) (*Au
 
 	// 用一个独立的 client 关掉 60s 默认 timeout（流式响应靠 context 控制时长）
 	streamClient := &http.Client{Transport: c.http.Transport}
+	start := time.Now()
 	resp, err := streamClient.Do(req)
 	if err != nil {
+		logger.Debug("[broker] audio_fetch error: %v", err)
 		cancel()
 		return nil, err
 	}
+	logger.Debug("[broker] audio_fetch → HTTP %d contentLength=%d (took=%s)",
+		resp.StatusCode, resp.ContentLength, time.Since(start))
 	if resp.StatusCode == http.StatusGone {
 		resp.Body.Close()
 		cancel()

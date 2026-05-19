@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/asr"
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
@@ -59,6 +60,7 @@ func (m *Manager) Run(ctx context.Context, srtPath, providerID, src, tgt string,
 		return "", fmt.Errorf("unknown translation provider type: %s", provider.Type)
 	}
 
+	logger.Debug("[translate] reading SRT: %s", srtPath)
 	subs, err := asr.ReadSRT(srtPath)
 	if err != nil {
 		return "", fmt.Errorf("read source srt: %w", err)
@@ -70,18 +72,22 @@ func (m *Manager) Run(ctx context.Context, srtPath, providerID, src, tgt string,
 	// 语言码映射
 	mappedSrc := ConvertLanguageCode(src, provider.Type)
 	mappedTgt := ConvertLanguageCode(tgt, provider.Type)
+	logger.Debug("[translate] lang map: %s→%s mapped to %s→%s (provider=%s)",
+		src, tgt, mappedSrc, mappedTgt, provider.Type)
 
 	maxRetries := 2
 	batchSize := provider.BatchSize
 	logger.Info("[translate] start: provider=%s type=%s isAi=%v %s→%s subs=%d batchSize=%d concurrency=%d",
 		provider.Name, provider.Type, provider.IsAi, mappedSrc, mappedTgt, len(subs), batchSize, provider.Concurrency)
 
+	start := time.Now()
 	var results []TranslationResult
 	if provider.IsAi {
 		results, err = HandleAIBatch(ctx, subs, *provider, mappedSrc, mappedTgt, translator, batchSize, onProgress, nil, maxRetries)
 	} else {
 		results, err = HandleAPIBatch(ctx, subs, *provider, mappedSrc, mappedTgt, translator, batchSize, onProgress, nil, maxRetries)
 	}
+	logger.Debug("[translate] batch done in %s err=%v results=%d", time.Since(start), err, len(results))
 	if err != nil {
 		return "", err
 	}

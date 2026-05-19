@@ -43,9 +43,18 @@ func main() {
 	}
 
 	cfg := store.Get()
+	logger.SetDebug(cfg.Settings.Debug)
 	logger.Info("workerId=%s workerName=%q", cfg.Worker.WorkerID, cfg.Worker.WorkerName)
 	logger.Info("modelsPath=%s whisperCli=%s ffmpeg=%s",
 		cfg.Settings.ModelsPath, cfg.Settings.WhisperCliPath, cfg.Settings.FFmpegPath)
+	logger.Debug("system settings: useCuda=%v useVAD=%v vadThreshold=%.2f minSpeech=%dms minSilence=%dms maxSpeech=%dms speechPad=%dms samplesOverlap=%.2f",
+		cfg.Settings.UseCuda, cfg.Settings.UseVAD, cfg.Settings.VadThreshold,
+		cfg.Settings.VadMinSpeechDuration, cfg.Settings.VadMinSilenceDuration,
+		cfg.Settings.VadMaxSpeechDuration, cfg.Settings.VadSpeechPad, cfg.Settings.VadSamplesOverlap)
+	logger.Debug("worker settings: pollInterval=%ds heartbeat=%ds errorBackoff=%ds verifyTls=%v whisperModel=%s sourceLang=%s targetLang=%s translateProvider=%q localMaxConcurrent=%d",
+		cfg.Worker.PollIntervalSec, cfg.Worker.HeartbeatIntervalSec, cfg.Worker.ErrorBackoffSec,
+		cfg.Worker.VerifyTLS, cfg.Worker.WhisperModel, cfg.Worker.SourceLanguage, cfg.Worker.TargetLanguage,
+		cfg.Worker.TranslateProviderID, cfg.Worker.LocalMaxConcurrentTasks)
 
 	workRoot := *flagWorkRoot
 	if workRoot == "" {

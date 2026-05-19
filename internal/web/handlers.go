@@ -142,6 +142,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeFail(w, err.Error())
 		return
 	}
+	// 立即应用调试开关，避免重启
+	logger.SetDebug(s.store.GetSettings().Debug)
 	writeOK(w, s.store.GetSettings())
 }
 
