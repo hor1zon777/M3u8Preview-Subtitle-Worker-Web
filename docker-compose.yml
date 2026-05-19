@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  subtitle-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subtitle-worker:latest
+    container_name: subtitle-worker
+    restart: unless-stopped
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./data:/data                          # 模型 / 配置 / 历史 / 临时工作
+      # HF 缓存持久化：避免每次重建都重新下载模型
+      - whisper-cache:/home/appuser/.cache/huggingface
+    # 可选：开启 Bearer Token 认证
+    # environment:
+    #   WEB_UI_TOKEN: "your-secret-token"
+    # 启用 GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  whisper-cache:
