@@ -110,6 +110,47 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 	srtBase := filepath.Join(workDir, "subtitle.source")
 	srtPath := srtBase + ".srt"
 
+	// ----------------------------------------------------------------------
+	// Server (常驻服务) 路径：wrapper 模式 + 非 Windows + Server.Ensure 成功
+	// ----------------------------------------------------------------------
+	if useWrapper {
+		cli := w.Settings.WhisperCliPath
+		if cli == "" {
+			cli = "whisper-cli"
+		}
+		if p, err := exec.LookPath(cli); err == nil {
+			cli = p
+		}
+		ensureErr := GlobalServer.Ensure(ctx, cli, opts.Model, !w.Settings.UseCuda)
+		if ensureErr == nil && GlobalServer.IsReady() {
+			vadParams := w.buildVadParamsMap()
+			req := TranscribeRequest{
+				ID:         filepath.Base(workDir),
+				Wav:        opts.WavPath,
+				Of:         srtBase,
+				Lang:       normLang(opts.SourceLanguage),
+				Prompt:     opts.Prompt,
+				MaxContext: opts.MaxContext,
+				Vad:        w.Settings.UseVAD,
+				VadParams:  vadParams,
+			}
+			resp, err := GlobalServer.Transcribe(ctx, req, onProgress)
+			if err != nil {
+				return "", fmt.Errorf("whisper exit: %w", err)
+			}
+			if st, e := os.Stat(resp.SrtPath); e != nil || st.Size() == 0 {
+				return "", fmt.Errorf("whisper 输出 SRT 为空（segments=%d duration=%.1fs）", resp.Segments, resp.Duration)
+			}
+			logger.Debug("[whisper] server mode done: segments=%d duration=%.1fs lang=%s",
+				resp.Segments, resp.Duration, resp.Language)
+			return resp.SrtPath, nil
+		}
+		logger.Warn("[whisper] server mode unavailable (%v), falling back to fork-per-job", ensureErr)
+	}
+
+	// ----------------------------------------------------------------------
+	// 兼容路径：CLI fork-per-job
+	// ----------------------------------------------------------------------
 	args := []string{
 		"-m", modelArg,
 		"-f", opts.WavPath,
@@ -119,10 +160,6 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 	}
 	if useWrapper {
 		args = append(args, "-pp") // 要进度输出
-	}
-	if useWrapper {
-		// wrapper 在 $PATH 中的 "whisper-cli" 需要传完整路径，因为 exec.LookPath
-		// 在 cmd.Start 里也会做，但对 trampoline 脚本正常
 	}
 	// GPU：whisper-cli 默认开 GPU；只在 useCuda=false 时显式关
 	if !w.Settings.UseCuda {
@@ -196,6 +233,31 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 		return "", fmt.Errorf(msg)
 	}
 	return srtPath, nil
+}
+
+// buildVadParamsMap 把 SystemSettings 里的 VAD 配置组装成 wrapper serve 模式可识别的字典。
+// threshold 这里同样 clamp 一次（双保险）。
+func (w *WhisperRunner) buildVadParamsMap() map[string]any {
+	if !w.Settings.UseVAD {
+		return nil
+	}
+	threshold := w.Settings.VadThreshold
+	if threshold >= 0.9 {
+		logger.Warn("[whisper] vadThreshold=%.2f too strict, clamping to 0.6", threshold)
+		threshold = 0.6
+	} else if threshold <= 0 {
+		threshold = 0.5
+	}
+	m := map[string]any{
+		"threshold":                threshold,
+		"min_speech_duration_ms":   w.Settings.VadMinSpeechDuration,
+		"min_silence_duration_ms":  w.Settings.VadMinSilenceDuration,
+		"speech_pad_ms":            w.Settings.VadSpeechPad,
+	}
+	if w.Settings.VadMaxSpeechDuration > 0 {
+		m["max_speech_duration_s"] = float64(w.Settings.VadMaxSpeechDuration) / 1000.0
+	}
+	return m
 }
 
 var progressRe = regexp.MustCompile(`progress\s*=\s*(\d+)\s*%`)

@@ -56,7 +56,11 @@ func HandleAIBatch(
 		mu       sync.Mutex
 		results  = make([]TranslationResult, 0, len(subs))
 		done     int
-		progress = func() {
+		// 统计计数器：success = 真正得到译文；placeholder = 整批失败被占位；empty = 译文为空字符串
+		successCount     int
+		placeholderCount int
+		emptyCount       int
+		progress         = func() {
 			if onProgress == nil {
 				return
 			}
@@ -73,6 +77,8 @@ func HandleAIBatch(
 	}
 
 	intervalMs := int(p.RequestInterval * 1000)
+	logger.Debug("[translate:ai] total=%d batches=%d batchSize=%d concurrency=%d intervalMs=%d retries=%d",
+		len(subs), totalBatches, batchSize, p.Concurrency, intervalMs, maxRetries)
 
 	RunBatchesConcurrent(ctx, p.Concurrency, intervalMs, totalBatches, func(ctx context.Context, idx int) error {
 		start := idx * batchSize
@@ -97,12 +103,19 @@ func HandleAIBatch(
 		})
 		_ = userPrompt // translator 自行决定如何使用；下面把 userPrompt 作为唯一文本传入
 
+		logger.Debug("[translate:ai] batch %d/%d start: rows=%d userPromptLen=%d",
+			idx+1, totalBatches, len(batch), len(userPrompt))
+
 		var lastErr error
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			texts, err := translator(ctx, []string{userPrompt}, p, src, tgt)
 			if err != nil {
 				lastErr = err
+				logger.Debug("[translate:ai] batch %d attempt %d translator error: %v", idx+1, attempt, err)
 				if isConfigurationError(err) {
+					mu.Lock()
+					placeholderCount += len(batch)
+					mu.Unlock()
 					return placeholderResults(batch, "[翻译失败: 配置错误]", &mu, &results, &done, progress, onBatchResult)
 				}
 				// 指数（线性）退避：1s * attempt
@@ -115,20 +128,36 @@ func HandleAIBatch(
 			}
 			if len(texts) == 0 {
 				lastErr = ErrEmptyTranslation
+				logger.Debug("[translate:ai] batch %d attempt %d: empty translator response", idx+1, attempt)
 				continue
 			}
 			raw := texts[0]
+			logger.Debug("[translate:ai] batch %d attempt %d rawLen=%d", idx+1, attempt, len(raw))
 			parsed, perr := parseAIBatchResponse(raw)
 			if perr != nil {
 				lastErr = fmt.Errorf("parse ai response: %w; raw=%s", perr, truncate(raw, 500))
-				logger.Warn("[translate:ai] batch %d parse failed (attempt %d): %v", idx, attempt, perr)
+				logger.Warn("[translate:ai] batch %d/%d parse failed (attempt %d): %v",
+					idx+1, totalBatches, attempt, perr)
 				continue
 			}
 			batchResults := mapAIResultsToSubtitles(batch, parsed)
+			// 统计本批成功数（target 非空 = 真翻译；空 = 模型漏了某些 id）
+			batchSuccess, batchEmpty := 0, 0
+			for _, r := range batchResults {
+				if strings.TrimSpace(r.TargetContent) == "" {
+					batchEmpty++
+				} else {
+					batchSuccess++
+				}
+			}
 			mu.Lock()
 			results = append(results, batchResults...)
 			done += len(batch)
+			successCount += batchSuccess
+			emptyCount += batchEmpty
 			mu.Unlock()
+			logger.Debug("[translate:ai] batch %d/%d done: parsed=%d success=%d empty=%d",
+				idx+1, totalBatches, len(parsed), batchSuccess, batchEmpty)
 			progress()
 			if onBatchResult != nil {
 				if err := onBatchResult(batchResults); err != nil {
@@ -138,6 +167,11 @@ func HandleAIBatch(
 			return nil
 		}
 		// 重试用完仍失败：占位
+		logger.Warn("[translate:ai] batch %d/%d exhausted retries → placeholder filled (%d rows)",
+			idx+1, totalBatches, len(batch))
+		mu.Lock()
+		placeholderCount += len(batch)
+		mu.Unlock()
 		return placeholderResults(batch, "[翻译失败: "+errString(lastErr)+"]", &mu, &results, &done, progress, onBatchResult)
 	})
 
@@ -146,6 +180,8 @@ func HandleAIBatch(
 	if onProgress != nil {
 		onProgress(100)
 	}
+	logger.Info("[translate:ai] summary: total=%d success=%d empty=%d placeholder=%d (provider=%s model=%s)",
+		len(subs), successCount, emptyCount, placeholderCount, p.Name, p.ModelName)
 	return results, nil
 }
 

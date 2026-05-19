@@ -106,7 +106,25 @@ func (m *Manager) Run(ctx context.Context, srtPath, providerID, src, tgt string,
 	if err := writeTranslatedSRT(outPath, results, "onlyTranslate"); err != nil {
 		return "", err
 	}
-	logger.Info("[translate] done: out=%s", outPath)
+
+	// 统计实际写入的有效字幕数：去掉译文为空 / 含失败占位标记的
+	written, empty, failed := 0, 0, 0
+	for _, r := range results {
+		tc := strings.TrimSpace(r.TargetContent)
+		if tc == "" {
+			empty++
+		} else if strings.HasPrefix(tc, "[翻译失败") {
+			failed++
+		} else {
+			written++
+		}
+	}
+	logger.Info("[translate] done: out=%s total=%d written=%d empty=%d failed=%d",
+		outPath, len(results), written, empty, failed)
+	if written == 0 {
+		return outPath, fmt.Errorf("translate produced 0 valid lines (total=%d empty=%d failed=%d) — 检查 provider %s 的 API key / 模型名 / response_format 配置",
+			len(results), empty, failed, provider.Name)
+	}
 	return outPath, nil
 }
 

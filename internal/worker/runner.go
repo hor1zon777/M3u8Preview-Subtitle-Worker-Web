@@ -219,6 +219,10 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	if asrErr != nil {
 		return asrErr
 	}
+	// ASR 完成后统计段数，便于和翻译阶段对照
+	if asrSubs, e := asr.ReadSRT(srtPath); e == nil {
+		logger.Info("[worker] [job %s] ASR done: %d segments", job.JobID, len(asrSubs))
+	}
 	logger.Debug("[worker] [job %s] ASR stage took=%s srt=%s", job.JobID, time.Since(asrStarted), srtPath)
 	if err := r.reportPhase(ctx, job.JobID, "asr", 75); err != nil {
 		return err

@@ -2,13 +2,24 @@
 """
 whisper-cli CLI 兼容 wrapper —— 底层用 faster-whisper。
 
-接受 whisper.cpp CLI 参数子集，翻译成 faster-whisper API 调用。
-Go backend (internal/asr/whisper.go) 下发的所有参数必须兼容。
+两种工作模式：
 
-用法：
-  whisper-cli -m <model> -f <wav> -l <lang> -osrt -of <basename> [-pp] [-pc] [-ng]
-              [-mc <int>] [--prompt <str>]
-              [--vad [--vad-threshold <v> --vad-min-speech-duration-ms <ms> ...]]
+1. CLI（默认）— 一次性进程，跑完单个 job 退出。
+     whisper-cli -m <model> -f <wav> -l <lang> -osrt -of <basename> ...
+
+2. SERVE — 常驻服务进程，模型加载一次后通过 Unix Domain Socket 持续服务。
+     whisper-cli --serve --socket /tmp/mws-whisper.sock -m <model> [-ng]
+   启动完成后向 stdout 输出 "READY" 一行，stderr 持续输出诊断日志。
+   客户端协议（每行一条 JSON）：
+     请求:  {"id":"<job_id>", "wav":"...", "of":"...", "lang":"ja",
+             "prompt":"", "max_context":-1, "vad":false, "vad_params":{...}}
+     响应（流式，多条）:
+       {"id":..., "event":"log",      "msg":"..."}
+       {"id":..., "event":"info",     "language":"ja", "duration":8142.0, "vad":false}
+       {"id":..., "event":"progress", "pct":42}
+       {"id":..., "event":"done",     "srt_path":"...", "segments":292}
+       {"id":..., "event":"error",    "msg":"..."}
+     另: {"event":"ping"} → {"event":"pong"} 用于健康检查。
 
   <model> 支持三种形式：
     - HF model id（如 large-v3、Systran/faster-whisper-large-v3）
@@ -16,15 +27,23 @@ Go backend (internal/asr/whisper.go) 下发的所有参数必须兼容。
     - ggml-<name>.bin 路径 → 自动提取 <name> 作为 HF id
 """
 
-import argparse, os, re, sys
+import argparse, json, os, re, socket, sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI args
 # ---------------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(allow_abbrev=False)
+    # 模式选择
+    p.add_argument('--serve', action='store_true', default=False,
+                   help='以常驻服务模式运行，监听 Unix Socket')
+    p.add_argument('--socket', dest='socket', default='/tmp/mws-whisper.sock',
+                   help='Unix Socket 路径（仅 --serve 模式）')
+    p.add_argument('--download-only', dest='download_only', action='store_true', default=False,
+                   help='仅下载模型到 HF cache，不做 ASR')
+
     p.add_argument('-m', dest='model_path', required=True,
                    help='HF model id / CT2 dir / ggml-<name>.bin path')
     p.add_argument('-f', dest='wav', default='',
@@ -38,10 +57,8 @@ def parse_args():
     p.add_argument('-ng', dest='no_gpu', action='store_true', default=False)
     p.add_argument('-mc', dest='max_context', type=int, default=-1)
     p.add_argument('--prompt', dest='prompt', default='')
-    p.add_argument('--download-only', dest='download_only', action='store_true', default=False,
-                   help='仅下载模型到 HF cache，不做 ASR')
 
-    # VAD flags
+    # VAD flags（仅 CLI 模式使用；serve 模式 VAD 由 JSON 请求传入）
     p.add_argument('--vad', action='store_true', default=False)
     p.add_argument('--vad-model', default='')
     p.add_argument('--vad-threshold', type=float, default=0.5)
@@ -55,29 +72,22 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
-# model path → HF id
+# helpers shared by CLI + serve
 # ---------------------------------------------------------------------------
 
 def resolve_model(raw: str) -> str:
     """
     /data/models/ggml-large-v3.bin → large-v3
-    /data/models/ggml-large-v3-turbo.bin → large-v3-turbo
     Systran/faster-whisper-large-v3 → 原样
-    large-v3 → 原样
     mobiuslabsgmbh--faster-whisper-large-v3-turbo → mobiuslabsgmbh/faster-whisper-large-v3-turbo
     /path/to/ct2_model/ → 原样（CT2 本地目录）
     """
-    name = Path(raw).stem          # /a/b/ggml-large-v3.bin → ggml-large-v3
+    name = Path(raw).stem
     name = re.sub(r'^ggml-', '', name)
-    # HF cache 目录格式: org--model → org/model
     if '/' not in name and '--' in name:
         name = name.replace('--', '/', 1)
     return name
 
-
-# ---------------------------------------------------------------------------
-# SRT time formatting
-# ---------------------------------------------------------------------------
 
 def fmt_ts(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -86,17 +96,12 @@ def fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace('.', ',')
 
 
-# ---------------------------------------------------------------------------
-# diagnostics
-# ---------------------------------------------------------------------------
-
 def log(msg: str):
-    """统一前缀日志，便于 Go 端 stderr 抓取归类。"""
+    """诊断日志统一前缀，便于 Go 端 stderr 抓取归类。"""
     print(f"[wrapper] {msg}", file=sys.stderr, flush=True)
 
 
 def detect_cuda():
-    """探测 CUDA / cuDNN 可用性，返回 (ok: bool, detail: str)。"""
     try:
         import ctranslate2  # noqa
         cuda_count = ctranslate2.get_cuda_device_count()
@@ -108,10 +113,6 @@ def detect_cuda():
 
 
 def resolve_device(no_gpu_flag: bool):
-    """
-    解析最终 device + compute_type。
-    返回 (device, compute_type, reason)。
-    """
     if no_gpu_flag:
         return 'cpu', 'int8', '-ng requested by caller'
     ok, detail = detect_cuda()
@@ -121,22 +122,87 @@ def resolve_device(no_gpu_flag: bool):
     return 'cpu', 'int8', f'CUDA unavailable, fallback ({detail})'
 
 
+def clamp_vad_params(vad_params):
+    """vad-threshold >=0.9 视为异常严格，clamp 到 0.6 避免空输出。"""
+    if not vad_params:
+        return vad_params
+    threshold = vad_params.get('threshold', 0.5)
+    if threshold >= 0.9:
+        log(f"WARN: vad-threshold={threshold} too strict, clamping to 0.6")
+        vad_params = dict(vad_params)
+        vad_params['threshold'] = 0.6
+    return vad_params
+
+
+def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
+                  on_progress=None, on_log=None):
+    """
+    单次 transcribe + 自动 fallback。返回 (seg_count, info, srt_path)。
+
+      on_progress(pct: int) - 每整数百分点触发
+      on_log(msg: str)      - 阶段性诊断
+    """
+    def emit_log(msg):
+        if on_log:
+            on_log(msg)
+        else:
+            log(msg)
+
+    lang = None if lang_in in ('', 'auto') else lang_in
+
+    def run(use_vad, vp):
+        srt_path = f"{of}.srt"
+        segments, info = model.transcribe(
+            wav,
+            language=lang,
+            initial_prompt=prompt or None,
+            vad_filter=use_vad,
+            vad_parameters=vp if use_vad else None,
+            **({} if max_ctx <= 0 else {'max_initial_prompt_ctx': max_ctx}),
+        )
+        emit_log(f"detected lang={info.language} prob={info.language_probability:.2f} "
+                 f"duration={info.duration:.1f}s vad={use_vad}")
+        total = float(info.duration) or 1.0
+        seg_count = 0
+        last_pct = -1
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            for i, seg in enumerate(segments, 1):
+                text = seg.text.strip()
+                if not text:
+                    continue
+                seg_count += 1
+                f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
+                if on_progress:
+                    pct = min(99, int(seg.end / total * 100))
+                    if pct != last_pct:
+                        last_pct = pct
+                        on_progress(pct)
+        return seg_count, info, srt_path
+
+    seg_count, info, srt_path = run(vad, vad_params)
+    if seg_count == 0 and vad:
+        emit_log(f"WARN: VAD produced 0 segments (threshold="
+                 f"{vad_params.get('threshold') if vad_params else 'n/a'}); "
+                 f"retrying without VAD to recover")
+        seg_count, info, srt_path = run(False, None)
+        if seg_count > 0:
+            emit_log(f"recovered {seg_count} segments without VAD — "
+                     f"建议在设置中降低 vadThreshold 或关闭 VAD")
+    return seg_count, info, srt_path
+
+
 # ---------------------------------------------------------------------------
-# main
+# CLI mode (one-shot, original behavior)
 # ---------------------------------------------------------------------------
 
-def main():
-    a = parse_args()
+def cli_main(a):
     model_id = resolve_model(a.model_path)
-
     device, compute_type, dev_reason = resolve_device(a.no_gpu)
     log(f"model_id={model_id} device={device} compute_type={compute_type} ({dev_reason})")
 
-    # --- download-only mode ---
     if a.download_only:
         from faster_whisper import WhisperModel
         print(f"downloading model {model_id} to HF cache ...", file=sys.stderr, flush=True)
-        # WhisperModel 构造时自动下载；huggingface_hub 的 tqdm 进度条输出到 stderr
         WhisperModel(model_id, device=device, compute_type=compute_type)
         print("", file=sys.stderr, flush=True)
         print("whisper_print_progress_callback: progress = 100%", file=sys.stderr, flush=True)
@@ -149,89 +215,40 @@ def main():
         log("ERROR: -of <basename> is required (except --download-only)")
         sys.exit(2)
 
-    # --- progress 回调 ---
-    last_pct = [-1]
-
-    def on_progress(seg_end_sec: float, total_sec: float):
-        if total_sec <= 0:
-            return
-        pct = min(99, int(seg_end_sec / total_sec * 100))
-        if pct != last_pct[0]:
-            last_pct[0] = pct
-            print(f"whisper_print_progress_callback: progress = {pct}%",
-                  file=sys.stderr, flush=True)
-
-    # --- faster-whisper ---
     from faster_whisper import WhisperModel
-
     log(f"loading model {model_id} ...")
     try:
         model = WhisperModel(model_id, device=device, compute_type=compute_type)
     except Exception as e:
-        # 常见：CUDA 库缺失但 device='cuda' / 模型仓库 404 / 磁盘满
         log(f"ERROR: WhisperModel init failed: {e!r}")
         raise
     log("model loaded")
 
-    # --- VAD ---
     vad_params = None
     if a.vad:
-        # threshold 越大越严格，>0.9 几乎肯定全部过滤；这里 clamp 并 warn
-        threshold = a.vad_threshold
-        if threshold >= 0.9:
-            log(f"WARN: vad-threshold={threshold} too strict, clamping to 0.6 to avoid empty output")
-            threshold = 0.6
         vad_params = dict(
-            threshold=threshold,
+            threshold=a.vad_threshold,
             min_speech_duration_ms=a.vad_min_speech_duration_ms,
             min_silence_duration_ms=a.vad_min_silence_duration_ms,
             speech_pad_ms=a.vad_speech_pad_ms,
         )
         if a.vad_max_speech_duration_s > 0:
             vad_params['max_speech_duration_s'] = a.vad_max_speech_duration_s
+        vad_params = clamp_vad_params(vad_params)
         log(f"VAD enabled: {vad_params}")
     else:
         log("VAD disabled")
 
-    # --- transcribe ---
-    lang = None if a.lang in ('', 'auto') else a.lang
-    log(f"transcribe start lang={lang or 'auto'} prompt_len={len(a.prompt)} max_ctx={a.max_context}")
+    log(f"transcribe start lang={a.lang} prompt_len={len(a.prompt)} max_ctx={a.max_context}")
 
-    def run_transcribe(use_vad: bool, vad_p):
-        """跑一次 transcribe + 写 SRT，返回 (seg_count, info)。"""
-        srt_path = f"{a.of}.srt"
-        last_pct[0] = -1
-        segments, info = model.transcribe(
-            a.wav,
-            language=lang,
-            initial_prompt=a.prompt or None,
-            vad_filter=use_vad,
-            vad_parameters=vad_p if use_vad else None,
-            **({} if a.max_context <= 0 else {'max_initial_prompt_ctx': a.max_context}),
-        )
-        log(f"detected lang={info.language} prob={info.language_probability:.2f} duration={info.duration:.1f}s vad={use_vad}")
-        total = info.duration or 1.0
-        seg_count = 0
-        with open(srt_path, 'w', encoding='utf-8') as f:
-            for i, seg in enumerate(segments, 1):
-                text = seg.text.strip()
-                if not text:
-                    continue
-                seg_count += 1
-                f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
-                if a.pp:
-                    on_progress(seg.end, total)
-        return seg_count, info, srt_path
+    def on_progress(pct):
+        if a.pp:
+            print(f"whisper_print_progress_callback: progress = {pct}%",
+                  file=sys.stderr, flush=True)
 
-    seg_count, info, srt_path = run_transcribe(a.vad, vad_params)
-
-    # 首次 VAD 跑出 0 segments → 自动 fallback 到 no-VAD 重跑一次
-    if seg_count == 0 and a.vad:
-        log(f"WARN: VAD produced 0 segments (threshold={vad_params.get('threshold') if vad_params else 'n/a'}); "
-            f"retrying without VAD to recover")
-        seg_count, info, srt_path = run_transcribe(False, None)
-        if seg_count > 0:
-            log(f"recovered {seg_count} segments without VAD — 建议在设置中降低 vadThreshold 或关闭 VAD")
+    seg_count, info, srt_path = do_transcribe(
+        model, a.wav, a.of, a.lang, a.prompt, a.max_context, a.vad, vad_params,
+        on_progress=on_progress)
 
     if a.pp:
         print("whisper_print_progress_callback: progress = 100%",
@@ -239,18 +256,152 @@ def main():
 
     log(f"transcribe done: {seg_count} segments written to {srt_path}")
 
-    # 与 whisper-cli 行为对齐：SRT 为空的 → exit 非 0，并给出诊断
     if seg_count == 0 or os.path.getsize(srt_path) == 0:
-        reason = []
-        reason.append("已尝试 with-VAD 与 without-VAD 两种模式，均产出 0 段")
+        reason = ["已尝试 with-VAD 与 without-VAD 两种模式，均产出 0 段"]
         if info.duration < 1.0:
             reason.append(f"audio duration only {info.duration:.2f}s (可能音频解码异常)")
         if device == 'cpu':
             reason.append("running on CPU — 性能可能不足以在合理时间内出结果")
-        reason_str = "; ".join(reason)
         log(f"ERROR: whisper output SRT is empty. duration={info.duration:.1f}s "
-            f"detected_lang={info.language} reason={reason_str}")
+            f"detected_lang={info.language} reason={'; '.join(reason)}")
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Serve mode (persistent server, IPC over Unix Socket)
+# ---------------------------------------------------------------------------
+
+def serve_main(a):
+    model_id = resolve_model(a.model_path)
+    device, compute_type, dev_reason = resolve_device(a.no_gpu)
+    log(f"[serve] model_id={model_id} device={device} compute_type={compute_type} ({dev_reason})")
+
+    from faster_whisper import WhisperModel
+    log(f"[serve] loading model {model_id} ...")
+    try:
+        model = WhisperModel(model_id, device=device, compute_type=compute_type)
+    except Exception as e:
+        log(f"[serve] ERROR: WhisperModel init failed: {e!r}")
+        sys.exit(1)
+    log("[serve] model loaded")
+
+    socket_path = a.socket
+    try:
+        if os.path.exists(socket_path):
+            os.remove(socket_path)
+    except OSError as e:
+        log(f"[serve] WARN: cannot remove stale socket {socket_path}: {e}")
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(socket_path)
+        os.chmod(socket_path, 0o600)
+        srv.listen(4)
+    except Exception as e:
+        log(f"[serve] ERROR: cannot bind socket {socket_path}: {e}")
+        sys.exit(1)
+
+    # 告知 Go 端就绪：READY 走 stdout，stderr 留给诊断
+    print("READY", flush=True)
+    sys.stdout.flush()
+    log(f"[serve] listening on {socket_path}")
+
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except (KeyboardInterrupt, SystemExit):
+            log("[serve] shutting down")
+            break
+        except Exception as e:
+            log(f"[serve] accept error: {e}")
+            continue
+        try:
+            handle_client(conn, model)
+        except Exception as e:
+            log(f"[serve] client handler error: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def handle_client(conn, model):
+    f_in = conn.makefile('r', encoding='utf-8')
+    f_out = conn.makefile('w', encoding='utf-8')
+
+    def send(obj):
+        f_out.write(json.dumps(obj, ensure_ascii=False) + '\n')
+        f_out.flush()
+
+    line = f_in.readline()
+    if not line:
+        return
+    try:
+        req = json.loads(line)
+    except Exception as e:
+        send({'event': 'error', 'msg': f'invalid request json: {e}'})
+        return
+
+    # 健康检查
+    if req.get('event') == 'ping':
+        send({'event': 'pong'})
+        return
+
+    job_id = req.get('id', '')
+    wav = req.get('wav', '')
+    of = req.get('of', '')
+    if not wav or not of:
+        send({'id': job_id, 'event': 'error', 'msg': 'wav and of required'})
+        return
+
+    lang_in = req.get('lang', 'auto')
+    prompt = req.get('prompt', '')
+    max_ctx = int(req.get('max_context', -1))
+    vad = bool(req.get('vad', False))
+    vad_params = req.get('vad_params') if vad else None
+    if isinstance(vad_params, dict):
+        vad_params = clamp_vad_params(vad_params)
+
+    def on_log(msg):
+        send({'id': job_id, 'event': 'log', 'msg': msg})
+
+    def on_progress(pct):
+        send({'id': job_id, 'event': 'progress', 'pct': int(pct)})
+
+    on_log(f"transcribe start lang={lang_in} prompt_len={len(prompt)} vad={vad}")
+    try:
+        seg_count, info, srt_path = do_transcribe(
+            model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
+            on_progress=on_progress, on_log=on_log)
+    except Exception as e:
+        import traceback
+        send({'id': job_id, 'event': 'error',
+              'msg': f'transcribe exception: {e}',
+              'traceback': traceback.format_exc()})
+        return
+
+    send({'id': job_id, 'event': 'progress', 'pct': 100})
+    if seg_count == 0:
+        send({'id': job_id, 'event': 'error',
+              'msg': f'whisper output SRT is empty. duration={info.duration:.1f}s '
+                     f'lang={info.language}'})
+        return
+    send({'id': job_id, 'event': 'done',
+          'srt_path': srt_path, 'segments': seg_count,
+          'language': info.language, 'duration': float(info.duration)})
+
+
+# ---------------------------------------------------------------------------
+# entrypoint
+# ---------------------------------------------------------------------------
+
+def main():
+    a = parse_args()
+    if a.serve:
+        serve_main(a)
+    else:
+        cli_main(a)
 
 
 if __name__ == '__main__':

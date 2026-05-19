@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/asr"
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/broker"
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
@@ -136,6 +137,8 @@ func (e *Engine) Stop(_ context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.client == nil {
+		// 即使 engine 未 Start 过，也要确保 asr server 关闭
+		asr.GlobalServer.Stop()
 		return
 	}
 	if e.poller != nil {
@@ -150,6 +153,8 @@ func (e *Engine) Stop(_ context.Context) {
 	e.client = nil
 	e.activeBaseURL = ""
 	e.activeToken = ""
+	// poller 已停 → 没有新 ASR 进来 → 安全关 server 释放 GPU 显存
+	asr.GlobalServer.Stop()
 	logger.Info("[worker] stopped")
 }
 

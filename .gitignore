@@ -9,6 +9,10 @@ subtitle-worker.exe
 *.out
 vendor/
 
+# Python
+__pycache__/
+*.pyc
+
 # Frontend
 web/.next/
 web/out/

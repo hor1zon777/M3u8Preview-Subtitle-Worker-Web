@@ -19,8 +19,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
+	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
 
 // 与 TS DefaultSystemPrompt 对齐。
@@ -149,6 +151,12 @@ func chatWithFallback(
 	for _, step := range fallback {
 		req.ResponseFormat = buildResponseFormat(step)
 		raw, _ := json.Marshal(req)
+		stepLabel := step
+		if stepLabel == "" {
+			stepLabel = "disabled"
+		}
+		logger.Debug("[translate:openai] POST %s model=%s response_format=%s msgCount=%d userLen=%d",
+			apiURL, req.Model, stepLabel, len(req.Messages), userMsgLen(req.Messages))
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(raw))
 		if err != nil {
 			return "", err
@@ -157,15 +165,20 @@ func chatWithFallback(
 		httpReq.Header.Set("Content-Type", "application/json")
 		applyCustomHeaders(httpReq, customParams)
 
+		start := time.Now()
 		resp, err := httpClient.Do(httpReq)
 		if err != nil {
+			logger.Debug("[translate:openai] request error: %v", err)
 			return "", fmt.Errorf("openai request: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		logger.Debug("[translate:openai] → HTTP %d (took=%s, bytes=%d, response_format=%s)",
+			resp.StatusCode, time.Since(start), len(body), stepLabel)
 
 		// 仅 response_format 相关 400 才退到下一级
 		if resp.StatusCode == 400 && strings.Contains(string(body), "response_format") {
+			logger.Debug("[translate:openai] response_format=%s rejected, falling back to next level", stepLabel)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -181,9 +194,20 @@ func chatWithFallback(
 		if len(parsed.Choices) == 0 {
 			return "", fmt.Errorf("openai: empty choices")
 		}
-		return parsed.Choices[0].Message.Content, nil
+		content := parsed.Choices[0].Message.Content
+		logger.Debug("[translate:openai] choices[0].message.content len=%d", len(content))
+		return content, nil
 	}
 	return "", fmt.Errorf("openai: all response_format fallbacks exhausted")
+}
+
+func userMsgLen(messages []chatMessage) int {
+	for _, m := range messages {
+		if m.Role == "user" {
+			return len(m.Content)
+		}
+	}
+	return 0
 }
 
 func renderVars(template, src, tgt string) string {
