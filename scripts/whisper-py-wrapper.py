@@ -27,11 +27,11 @@ def parse_args():
     p = argparse.ArgumentParser(allow_abbrev=False)
     p.add_argument('-m', dest='model_path', required=True,
                    help='HF model id / CT2 dir / ggml-<name>.bin path')
-    p.add_argument('-f', dest='wav', required=True,
+    p.add_argument('-f', dest='wav', default='',
                    help='16kHz mono PCM WAV')
     p.add_argument('-l', dest='lang', default='auto')
     p.add_argument('-osrt', action='store_true', default=True)
-    p.add_argument('-of', dest='of', required=True,
+    p.add_argument('-of', dest='of', default='',
                    help='output .srt basename（无后缀）')
     p.add_argument('-pp', action='store_true', default=False)
     p.add_argument('-pc', action='store_true', default=False)
@@ -93,17 +93,18 @@ def main():
 
     # --- download-only mode ---
     if a.download_only:
-        # 用 WhisperModel 构造触发下载，利用 faster-whisper 内置的
-        # HF repo 映射（large-v3-turbo → deepdml/..., large-v3 → Systran/...）
         from faster_whisper import WhisperModel
         print(f"downloading model {model_id} ...", file=sys.stderr, flush=True)
-        try:
-            WhisperModel(model_id, device=device, compute_type=compute_type)
-        except Exception as e:
-            print(f"ERROR: download failed: {e}", file=sys.stderr, flush=True)
-            sys.exit(2)
+        WhisperModel(model_id, device=device, compute_type=compute_type)
         print("whisper_print_progress_callback: progress = 100%", file=sys.stderr, flush=True)
         sys.exit(0)
+
+    if not a.wav:
+        print("ERROR: -f <wav> is required (except --download-only)", file=sys.stderr)
+        sys.exit(2)
+    if not a.of:
+        print("ERROR: -of <basename> is required (except --download-only)", file=sys.stderr)
+        sys.exit(2)
 
     # --- progress 回调 ---
     last_pct = [-1]
