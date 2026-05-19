@@ -22,6 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,18 +107,33 @@ func (d *Downloader) downloadFasterWhisper(ctx context.Context, model string, on
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("wrapper start: %w", err)
 	}
-	// 读 stderr 直到 EOF，同时推进度
-	buf := make([]byte, 4096)
+	// 读 stderr 直到 EOF。huggingface_hub 的 tqdm 进度条用 \r 刷新，
+	// Go 端必须按 \r/\n 切分才能抓到 45% 这类中间值。
+	buf := make([]byte, 64*1024)
+	remain := ""
 	for {
 		n, err := stderr.Read(buf)
 		if n > 0 {
-			s := string(buf[:n])
+			s := remain + string(buf[:n])
 			stderrBuf.WriteString(s)
-			if strings.Contains(s, "downloading model") && onProgress != nil {
-				onProgress(1)
+			// 按 \r 或 \n 切分行，tqdm 用 \r 原地刷新
+			lines := strings.FieldsFunc(s, func(r rune) bool { return r == '\r' || r == '\n' })
+			// 最后一段可能不完整（下一次 Read 继续拼接）
+			remain = ""
+			if len(lines) > 0 && !strings.HasSuffix(s, "\n") && !strings.HasSuffix(s, "\r") {
+				remain = lines[len(lines)-1]
+				lines = lines[:len(lines)-1]
 			}
-			if strings.Contains(s, "progress = 100%") && onProgress != nil {
-				onProgress(100)
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				// tqdm: "Fetching 5 files:  45%|████▌     | 697M/1.55G ..."
+				// wrapper: "whisper_print_progress_callback: progress = 100%"
+				if pct := extractDownloadPercent(line); pct >= 0 && onProgress != nil {
+					onProgress(pct)
+				}
 			}
 		}
 		if err != nil {
@@ -224,4 +241,31 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// tqdmPercent 匹配 huggingface_hub tqdm 输出：  " 45%|██..."
+// 也匹配 wrapper 的 "progress = 100%"
+var tqdmPercent = regexp.MustCompile(`(\d+)%`)
+
+// extractDownloadPercent 从一行 stderr 中提取百分比。无匹配返回 -1。
+func extractDownloadPercent(line string) int {
+	// 优先匹配 tqdm 行（"Fetching N files:" 开头的行有百分比）
+	if !strings.Contains(line, "%") {
+		return -1
+	}
+	m := tqdmPercent.FindStringSubmatch(line)
+	if len(m) < 2 {
+		return -1
+	}
+	pct, err := strconv.Atoi(m[1])
+	if err != nil {
+		return -1
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
 }

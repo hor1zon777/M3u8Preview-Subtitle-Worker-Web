@@ -94,8 +94,10 @@ def main():
     # --- download-only mode ---
     if a.download_only:
         from faster_whisper import WhisperModel
-        print(f"downloading model {model_id} ...", file=sys.stderr, flush=True)
+        print(f"downloading model {model_id} to HF cache ...", file=sys.stderr, flush=True)
+        # WhisperModel 构造时自动下载；huggingface_hub 的 tqdm 进度条输出到 stderr
         WhisperModel(model_id, device=device, compute_type=compute_type)
+        print("", file=sys.stderr, flush=True)
         print("whisper_print_progress_callback: progress = 100%", file=sys.stderr, flush=True)
         sys.exit(0)
 
