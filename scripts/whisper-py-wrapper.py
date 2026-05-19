@@ -201,28 +201,29 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
         return seg_count, info, srt_path, text_counter
 
     seg_count, info, srt_path, text_counter = run(vad, vad_params)
+    actual_vad = vad  # 实际最后一次跑用的 VAD 状态（VAD 0 段 fallback 后会改成 False）
     if seg_count == 0 and vad:
         emit_log(f"WARN: VAD produced 0 segments (threshold="
                  f"{vad_params.get('threshold') if vad_params else 'n/a'}); "
                  f"retrying without VAD to recover")
         seg_count, info, srt_path, text_counter = run(False, None)
+        actual_vad = False
         if seg_count > 0:
             emit_log(f"recovered {seg_count} segments without VAD — "
                      f"建议在设置中降低 vadThreshold 或关闭 VAD")
 
-    # --- 幻觉检测：同一短语高频出现且未启用 VAD → 重跑一次启用 VAD ---
+    # --- 幻觉检测 ---
     if seg_count >= 5 and text_counter:
         top_text, top_count = text_counter.most_common(1)[0]
         ratio = top_count / seg_count
         if top_count >= 5 and ratio > 0.3:
             emit_log(f"WARN: hallucination suspected — top phrase '{top_text[:50]}' "
                      f"appeared {top_count} times ({ratio*100:.0f}% of {seg_count} segments)")
-            if not vad:
+            if not actual_vad:
+                # 当前实际没在用 VAD → 尝试用 faster-whisper 默认 VAD 救一下
                 emit_log("retrying with default-VAD to suppress hallucination ...")
-                # 使用 faster-whisper 默认 VAD 参数（min_silence=2000, threshold=0.5）
                 retry_count, retry_info, retry_path, retry_counter = run(True, None)
                 if retry_count > 0:
-                    # 检查重试结果是否仍有同样幻觉
                     rt_top_text, rt_top_count = retry_counter.most_common(1)[0]
                     rt_ratio = rt_top_count / retry_count
                     if rt_top_count < 5 or rt_ratio <= 0.3:
@@ -233,8 +234,14 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
                         emit_log(f"VAD retry still shows hallucination "
                                  f"(top {rt_top_count}/{retry_count} = {rt_ratio*100:.0f}%) — "
                                  f"音频可能本身有大量静音或 BGM，建议检查输入")
-                        # 保留 retry 结果，因为大概率比无 VAD 版本干净
                         seg_count, info, srt_path = retry_count, retry_info, retry_path
+            else:
+                # 已经在 VAD 模式下仍有幻觉 → 单纯 warn，提示用户检查音频
+                emit_log("已启用 VAD 仍出现高频重复短语 — 音频可能有较多 BGM/纯音乐段，"
+                         "或视频末尾片头片尾类台词重复出现。"
+                         "可尝试：1) 调高 vad-threshold 至 0.5-0.7；"
+                         "2) 调高 min-silence-duration-ms 至 1000-2000；"
+                         "3) 检查源音频是否有效")
 
     return seg_count, info, srt_path
 
