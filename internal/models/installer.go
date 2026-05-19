@@ -46,9 +46,10 @@ func (i *Installer) List() ([]string, error) {
 	}
 
 	// 2) HF cache（faster-whisper 模型）
-	// 缓存目录结构：~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<hash>/
-	//   例：models--Systran--faster-whisper-large-v3
-	//       models--guillaumeklay--faster-whisper-large-v3-turbo
+	// 缓存目录：~/.cache/huggingface/hub/models--<org>--<repo>/
+	// 例：models--Systran--faster-whisper-large-v3
+	//     models--deepdml--faster-whisper-large-v3-turbo-ct2
+	// 提取 catalog 中的短名：large-v3, large-v3-turbo, tiny, ...
 	home, err := os.UserHomeDir()
 	if err == nil {
 		hfDir := filepath.Join(home, ".cache", "huggingface", "hub")
@@ -58,16 +59,21 @@ func (i *Installer) List() ([]string, error) {
 				if !e.IsDir() || !strings.HasPrefix(e.Name(), "models--") {
 					continue
 				}
-				// models--org--name → org/name
-				parts := strings.SplitN(strings.TrimPrefix(e.Name(), "models--"), "--", 2)
-				modelID := strings.ReplaceAll(e.Name()[len("models--"):], "--", "/")
-				_ = modelID // 完整 HF id（如 Systran/faster-whisper-large-v3）
-				// 提取末尾 size 名（large-v3, small, …）
-				if len(parts) >= 2 {
-					seen[parts[len(parts)-1]] = true
+				// models--Org--faster-whisper-large-v3(-turbo)(-ct2)
+				full := e.Name()[len("models--"):] // Org--faster-whisper-large-v3
+				last := full
+				if idx := strings.LastIndex(full, "--"); idx >= 0 {
+					last = full[idx+2:] // faster-whisper-large-v3-turbo-ct2
 				}
-				// 也加带 org 前缀的完整 id 作为可选项
-				seen[modelID] = true
+				// 加到结果集
+				seen[full] = true // Org/faster-whisper-large-v3
+				// 提取短名：去掉 faster-whisper- 前缀、-ct2 后缀
+				short := last
+				short = strings.TrimPrefix(short, "faster-whisper-")
+				short = strings.TrimSuffix(short, "-ct2")
+				if short != "" {
+					seen[short] = true // large-v3-turbo
+				}
 			}
 		}
 	}
