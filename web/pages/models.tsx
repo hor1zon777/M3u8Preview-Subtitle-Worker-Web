@@ -20,7 +20,7 @@ export default function ModelsPage() {
   const [catalog, setCatalog] = useState<ModelCategory[]>([]);
   const [installed, setInstalled] = useState<string[]>([]);
   const [modelsPath, setModelsPath] = useState<string>('');
-  const [source, setSource] = useState<'hf-mirror' | 'huggingface'>('hf-mirror');
+  const [source, setSource] = useState<'hf-mirror' | 'huggingface' | 'hf-cdn'>('hf-mirror');
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [engine, setEngine] = useState<string>('unknown');
@@ -100,6 +100,7 @@ export default function ModelsPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="hf-mirror">hf-mirror.com（国内）</SelectItem>
+              <SelectItem value="hf-cdn">hf-cdn.sufy.com（国内 CDN）</SelectItem>
               <SelectItem value="huggingface">huggingface.co</SelectItem>
             </SelectContent>
           </Select>

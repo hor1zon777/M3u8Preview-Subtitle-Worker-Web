@@ -46,7 +46,10 @@ var globalDownloads sync.Map
 // NewDownloader 构造。Source 默认 hf-mirror（境内网络更快）。
 // engine 为 "faster-whisper" 时走 Python wrapper 下载。
 func NewDownloader(modelsPath, source, engine, wrapper string) *Downloader {
-	if source != "huggingface" {
+	switch source {
+	case "huggingface", "hf-cdn":
+		// ok
+	default:
 		source = "hf-mirror"
 	}
 	if wrapper == "" {
@@ -134,6 +137,8 @@ func (d *Downloader) downloadWhisperCpp(ctx context.Context, model string, onPro
 	host := "hf-mirror.com"
 	if d.Source == "huggingface" {
 		host = "huggingface.co"
+	} else if d.Source == "hf-cdn" {
+		host = "hf-cdn.sufy.com"
 	}
 	url := fmt.Sprintf("https://%s/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin", host, model)
 
