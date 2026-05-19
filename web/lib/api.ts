@@ -41,7 +41,12 @@ async function http<T>(method: string, path: string, body?: any): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) {
-    throw new Error('unauthorized: 请配置 WEB_UI_TOKEN');
+    // 触发全局登录 gate 重新拉起登录页
+    setAuthToken(undefined);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('mws:unauthorized'));
+    }
+    throw new Error('unauthorized: 请在登录页输入 Token');
   }
   const env: ApiEnvelope<T> = await resp.json();
   if (env.ok === false) {
@@ -86,6 +91,12 @@ export interface SystemSettings {
   vadSpeechPad: number;
   vadSamplesOverlap: number;
   debug: boolean;
+  webToken: string;
+}
+
+export interface AuthStatus {
+  tokenRequired: boolean;
+  authenticated: boolean;
 }
 
 export interface Provider {
@@ -213,4 +224,9 @@ export const api = {
   downloadModel: (name: string, source?: string) =>
     http<{ started: boolean }>('POST', `/api/models/${encodeURIComponent(name)}/download` + (source ? `?source=${source}` : '')),
   deleteModel: (name: string) => http<{ deleted: string }>('DELETE', `/api/models/${encodeURIComponent(name)}`),
+
+  // 认证
+  getAuthStatus: () => http<AuthStatus>('GET', '/api/auth/status'),
+  login: (token: string) =>
+    http<{ authenticated: boolean; tokenRequired: boolean }>('POST', '/api/auth/login', { token }),
 };

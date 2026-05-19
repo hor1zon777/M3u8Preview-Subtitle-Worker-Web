@@ -33,20 +33,17 @@ const DEFAULT: SystemSettings = {
   vadSpeechPad: 30,
   vadSamplesOverlap: 0.1,
   debug: false,
+  webToken: '',
 };
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [s, setS] = useState<SystemSettings>(DEFAULT);
-  const [token, setToken] = useState<string>('');
 
   useEffect(() => {
     api.getSettings()
       .then((v) => setS({ ...DEFAULT, ...v }))
       .catch((e) => toast.error('加载失败：' + e.message));
-    if (typeof window !== 'undefined') {
-      setToken(localStorage.getItem('mws_token') || '');
-    }
   }, []);
 
   const update = <K extends keyof SystemSettings>(key: K, v: SystemSettings[K]) =>
@@ -56,15 +53,14 @@ export default function SettingsPage() {
     try {
       const next = await api.putSettings(s);
       setS({ ...DEFAULT, ...next });
+      // 如果用户改了 webToken，把新 token 同步到 localStorage，避免下次刷新
+      // 之后 401。空 token = 关闭认证，本地 token 一并清掉。
+      const newToken = (next.webToken || '').trim();
+      setAuthToken(newToken || undefined);
       toast.success('已保存');
     } catch (e: any) {
       toast.error('保存失败：' + e.message);
     }
-  };
-
-  const saveToken = () => {
-    setAuthToken(token.trim() || undefined);
-    toast.success(token.trim() ? '已保存 Bearer Token' : '已清除 Bearer Token');
   };
 
   return (
@@ -98,26 +94,25 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Bearer Token */}
+      {/* Web UI 访问 Token */}
       <Card>
         <CardHeader>
           <CardTitle className="text-sm flex items-center gap-2">
-            <KeyRound className="size-4" /> Web UI Bearer Token（可选）
+            <KeyRound className="size-4" /> Web UI 访问 Token
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            后端启动时若设置了环境变量 <code>WEB_UI_TOKEN</code>，所有 API 请求需要带此 Token。
-            将此处保存的 Token 写入浏览器 localStorage（仅本机有效）。
+            设置后，所有访问 Web UI 都需要先在登录页输入此 Token。留空 = 不强制认证（任何人能访问，建议仅在本机环境使用）。
+            保存后立即生效，所有打开此 UI 的浏览器都会在下次请求时被要求重新登录。
           </p>
           <div className="flex gap-2">
             <Input
               type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="未启用认证时留空"
+              value={s.webToken}
+              onChange={(e) => update('webToken', e.target.value)}
+              placeholder="留空 = 不强制认证"
             />
-            <Button onClick={saveToken}>保存</Button>
           </div>
         </CardContent>
       </Card>

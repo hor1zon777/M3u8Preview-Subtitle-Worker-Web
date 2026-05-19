@@ -74,11 +74,12 @@ func main() {
 	}
 	engine := worker.NewEngine(store, state, translateAdapter, workRoot)
 
-	authToken := os.Getenv("WEB_UI_TOKEN")
-	if authToken != "" {
-		logger.Info("[web] bearer token auth enabled")
+	if cfg.Settings.WebToken != "" {
+		logger.Info("[web] bearer token auth enabled (configured in settings)")
+	} else {
+		logger.Info("[web] no token configured — open access; set token in Settings page")
 	}
-	srv := web.New(*flagAddr, authToken, store, engine, state, trMgr)
+	srv := web.New(*flagAddr, store, engine, state, trMgr)
 
 	// 如果上次保存的 enabled=true，则自动启 worker
 	if cfg.Worker.Enabled {

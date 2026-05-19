@@ -49,12 +49,11 @@ type Server struct {
 	translate *translate.Manager
 	dl        *models.Downloader
 	installer *models.Installer
-	authToken string
 	httpSrv   *http.Server
 }
 
-// New 构造。authToken 为空表示不强制认证。
-func New(addr string, authToken string,
+// New 构造。Token 认证不再来自环境变量，由 SystemSettings.WebToken 控制。
+func New(addr string,
 	store *config.Store, engine *worker.Engine, state *worker.State,
 	tr *translate.Manager) *Server {
 	settings := store.GetSettings()
@@ -69,7 +68,6 @@ func New(addr string, authToken string,
 		translate: tr,
 		dl:        models.NewDownloader(settings.ModelsPath, "hf-mirror", engStr, settings.WhisperCliPath),
 		installer: &models.Installer{ModelsPath: settings.ModelsPath},
-		authToken: authToken,
 	}
 	s.httpSrv = &http.Server{
 		Addr:              addr,
@@ -109,6 +107,10 @@ func (s *Server) router() http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(s.authMiddleware())
+
+		// 认证相关：authMiddleware 内部对这两个 path 直接放行
+		r.Get("/auth/status", s.handleAuthStatus)
+		r.Post("/auth/login", s.handleAuthLogin)
 
 		r.Get("/health", s.handleHealth)
 		r.Get("/version", s.handleVersion)

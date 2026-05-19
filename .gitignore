@@ -26,8 +26,8 @@ internal/web/dist/404.html
 internal/web/dist/*/
 
 # Local config / data
-data/
-config/
+/data/
+/config/
 *.log
 
 # IDE

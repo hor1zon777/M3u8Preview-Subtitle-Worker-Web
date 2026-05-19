@@ -54,6 +54,57 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeOK(w, map[string]any{"status": "ok"})
 }
 
+// handleAuthStatus 不受认证保护：让前端先看是否需要登录。
+//
+// 响应：
+//   { tokenRequired: bool, authenticated: bool }
+//
+// authenticated = 当前请求自带的 Bearer 是否匹配（用于刷新页面时复用 localStorage）。
+func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	token := s.currentToken()
+	type authStatus struct {
+		TokenRequired bool `json:"tokenRequired"`
+		Authenticated bool `json:"authenticated"`
+	}
+	if token == "" {
+		writeOK(w, authStatus{TokenRequired: false, Authenticated: true})
+		return
+	}
+	// 提取 Bearer
+	auth := r.Header.Get("Authorization")
+	supplied := ""
+	if strings.HasPrefix(auth, "Bearer ") {
+		supplied = strings.TrimSpace(auth[7:])
+	}
+	writeOK(w, authStatus{TokenRequired: true, Authenticated: supplied == token})
+}
+
+// handleAuthLogin 不受认证保护：仅校验 token，正确返回 200/ok=true。
+//
+// 请求体: { token: string }
+// 响应:   { authenticated: bool }
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	configured := s.currentToken()
+	if configured == "" {
+		// 当前未配置 token → 任何输入都视作"无需登录"
+		writeOK(w, map[string]any{"authenticated": true, "tokenRequired": false})
+		return
+	}
+	if strings.TrimSpace(in.Token) == configured {
+		writeOK(w, map[string]any{"authenticated": true, "tokenRequired": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, envelope[map[string]any]{
+		OK:      false,
+		Data:    map[string]any{"authenticated": false, "tokenRequired": true},
+		Message: "token 不正确",
+	})
+}
+
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeOK(w, map[string]any{
 		"version": "0.1.0",
