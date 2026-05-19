@@ -21,6 +21,7 @@ func ClassifyError(msg string) broker.ErrorKind {
 		return broker.ErrKindWhisperEmptyTranscription
 	case strings.Contains(lower, "whisper 未生成 srt"),
 		strings.Contains(lower, "model not found"),
+		strings.Contains(lower, "invalid model size"),
 		strings.Contains(lower, "modelspath"),
 		strings.Contains(lower, "cannot find model"),
 		strings.Contains(lower, "no such file") && strings.Contains(lower, "ggml-"):

@@ -64,10 +64,15 @@ def resolve_model(raw: str) -> str:
     /data/models/ggml-large-v3-turbo.bin → large-v3-turbo
     Systran/faster-whisper-large-v3 → 原样
     large-v3 → 原样
+    mobiuslabsgmbh--faster-whisper-large-v3-turbo → mobiuslabsgmbh/faster-whisper-large-v3-turbo
     /path/to/ct2_model/ → 原样（CT2 本地目录）
     """
     name = Path(raw).stem          # /a/b/ggml-large-v3.bin → ggml-large-v3
-    return re.sub(r'^ggml-', '', name)
+    name = re.sub(r'^ggml-', '', name)
+    # HF cache 目录格式: org--model → org/model
+    if '/' not in name and '--' in name:
+        name = name.replace('--', '/', 1)
+    return name
 
 
 # ---------------------------------------------------------------------------
