@@ -1,5 +1,6 @@
 # Build artifacts
 subtitle-worker
+subtitle-worker-linux
 subtitle-worker.exe
 *.exe
 
