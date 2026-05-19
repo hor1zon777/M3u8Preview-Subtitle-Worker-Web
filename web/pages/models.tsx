@@ -45,6 +45,9 @@ export default function ModelsPage() {
       setInstalled(Array.isArray(r.installed) ? r.installed : []);
       setModelsPath(r.modelsPath);
       setEngine(sys?.whisperEngine || 'unknown');
+      // 下载完成后清除进度，让按钮切回"已安装 ✓"
+      setProgress({});
+      setErrors({});
     } catch (e: any) {
       toast.error('加载模型列表失败：' + e.message);
     }
