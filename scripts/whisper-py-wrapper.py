@@ -196,29 +196,42 @@ def main():
     # --- transcribe ---
     lang = None if a.lang in ('', 'auto') else a.lang
     log(f"transcribe start lang={lang or 'auto'} prompt_len={len(a.prompt)} max_ctx={a.max_context}")
-    segments, info = model.transcribe(
-        a.wav,
-        language=lang,
-        initial_prompt=a.prompt or None,
-        vad_filter=a.vad,
-        vad_parameters=vad_params,
-        **({} if a.max_context <= 0 else {'max_initial_prompt_ctx': a.max_context}),
-    )
-    log(f"detected lang={info.language} prob={info.language_probability:.2f} duration={info.duration:.1f}s")
 
-    # --- write SRT ---
-    srt_path = f"{a.of}.srt"
-    total = info.duration or 1.0
-    seg_count = 0
-    with open(srt_path, 'w', encoding='utf-8') as f:
-        for i, seg in enumerate(segments, 1):
-            text = seg.text.strip()
-            if not text:
-                continue
-            seg_count += 1
-            f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
-            if a.pp:
-                on_progress(seg.end, total)
+    def run_transcribe(use_vad: bool, vad_p):
+        """跑一次 transcribe + 写 SRT，返回 (seg_count, info)。"""
+        srt_path = f"{a.of}.srt"
+        last_pct[0] = -1
+        segments, info = model.transcribe(
+            a.wav,
+            language=lang,
+            initial_prompt=a.prompt or None,
+            vad_filter=use_vad,
+            vad_parameters=vad_p if use_vad else None,
+            **({} if a.max_context <= 0 else {'max_initial_prompt_ctx': a.max_context}),
+        )
+        log(f"detected lang={info.language} prob={info.language_probability:.2f} duration={info.duration:.1f}s vad={use_vad}")
+        total = info.duration or 1.0
+        seg_count = 0
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            for i, seg in enumerate(segments, 1):
+                text = seg.text.strip()
+                if not text:
+                    continue
+                seg_count += 1
+                f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
+                if a.pp:
+                    on_progress(seg.end, total)
+        return seg_count, info, srt_path
+
+    seg_count, info, srt_path = run_transcribe(a.vad, vad_params)
+
+    # 首次 VAD 跑出 0 segments → 自动 fallback 到 no-VAD 重跑一次
+    if seg_count == 0 and a.vad:
+        log(f"WARN: VAD produced 0 segments (threshold={vad_params.get('threshold') if vad_params else 'n/a'}); "
+            f"retrying without VAD to recover")
+        seg_count, info, srt_path = run_transcribe(False, None)
+        if seg_count > 0:
+            log(f"recovered {seg_count} segments without VAD — 建议在设置中降低 vadThreshold 或关闭 VAD")
 
     if a.pp:
         print("whisper_print_progress_callback: progress = 100%",
@@ -229,14 +242,12 @@ def main():
     # 与 whisper-cli 行为对齐：SRT 为空的 → exit 非 0，并给出诊断
     if seg_count == 0 or os.path.getsize(srt_path) == 0:
         reason = []
-        if a.vad:
-            reason.append(f"VAD active (threshold={vad_params.get('threshold') if vad_params else 'n/a'}); "
-                          "考虑降低 threshold 或关闭 VAD 重试")
+        reason.append("已尝试 with-VAD 与 without-VAD 两种模式，均产出 0 段")
         if info.duration < 1.0:
             reason.append(f"audio duration only {info.duration:.2f}s (可能音频解码异常)")
         if device == 'cpu':
             reason.append("running on CPU — 性能可能不足以在合理时间内出结果")
-        reason_str = "; ".join(reason) or "unknown (try disabling VAD or lowering threshold)"
+        reason_str = "; ".join(reason)
         log(f"ERROR: whisper output SRT is empty. duration={info.duration:.1f}s "
             f"detected_lang={info.language} reason={reason_str}")
         sys.exit(1)
