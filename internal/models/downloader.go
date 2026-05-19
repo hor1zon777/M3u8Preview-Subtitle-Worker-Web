@@ -34,7 +34,7 @@ type ProgressFn func(percent int)
 // Downloader 模型下载器。
 type Downloader struct {
 	ModelsPath string
-	Source     string // "huggingface" | "hf-mirror"（仅 whisper.cpp 模式）
+	Source     string // "huggingface" | "hf-mirror" | "hf-cdn"（whisper.cpp 和 faster-whisper 共用）
 	Engine     string // "whisper-cli" | "faster-whisper"
 	Wrapper    string // faster-whisper 模式：wrapper 路径（默认 whisper-cli 即 PATH 中的 trampoline）
 	http       *http.Client
@@ -86,8 +86,17 @@ func (d *Downloader) Download(ctx context.Context, model string, onProgress Prog
 }
 
 // downloadFasterWhisper 调 Python wrapper --download-only，模型进 HF cache。
+// 通过 HF_ENDPOINT 环境变量控制镜像源。
 func (d *Downloader) downloadFasterWhisper(ctx context.Context, model string, onProgress ProgressFn) error {
 	cmd := exec.CommandContext(ctx, d.Wrapper, "--download-only", "-m", model)
+	// 设置 HF 镜像
+	cmd.Env = os.Environ()
+	switch d.Source {
+	case "hf-mirror":
+		cmd.Env = append(cmd.Env, "HF_ENDPOINT=https://hf-mirror.com")
+	case "hf-cdn":
+		cmd.Env = append(cmd.Env, "HF_ENDPOINT=https://hf-cdn.sufy.com")
+	}
 	var stderrBuf strings.Builder
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

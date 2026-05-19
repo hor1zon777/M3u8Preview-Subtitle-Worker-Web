@@ -95,7 +95,7 @@ export default function ModelsPage() {
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">下载源</span>
           <Select value={source} onValueChange={(v) => setSource(v as any)}>
-            <SelectTrigger className="w-44">
+            <SelectTrigger className="w-52">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
