@@ -89,8 +89,9 @@ export default function ModelsPage() {
                 {engine === 'faster-whisper' ? 'faster-whisper' : engine === 'whisper-cli' ? 'whisper.cpp' : engine}
               </Badge>
               <span className="mx-1">·</span>
-              存储：<code className="text-xs">{modelsPath || '未配置'}</code>
-              {engine === 'faster-whisper' && <span className="text-xs text-muted-foreground ml-1">(+ HF cache)</span>}
+              存储：<code className="text-xs">
+                {engine === 'faster-whisper' ? '~/.cache/huggingface/hub/' : (modelsPath || '未配置')}
+              </code>
             </p>
           </div>
         </div>
