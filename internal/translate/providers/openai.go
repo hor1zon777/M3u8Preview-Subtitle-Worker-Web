@@ -19,11 +19,23 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/logger"
 )
+
+// responseFormatCache 缓存 (apiURL+model) → 成功 response_format 级别。
+//
+// 很多兼容厂商不支持 json_schema：第一批先试 schema → 400 → 退 object，
+// 后续批次再来一次同样的失败是纯浪费（48 批 × 0.5s = 24s）。
+// 命中缓存时直接从已知 level 开始尝试。
+var responseFormatCache sync.Map
+
+func cacheKey(apiURL, model string) string {
+	return apiURL + "::" + model
+}
 
 // 与 TS DefaultSystemPrompt 对齐。
 const defaultSystemPrompt = `你是一位专业字幕翻译专家。请将给定的 ${sourceLanguage} 字幕翻译成 ${targetLanguage}，遵守以下要求：
@@ -141,6 +153,8 @@ func buildResponseFormat(level string) map[string]any {
 //   先 json_schema → API 报 "response_format" 400 则退到 json_object →
 //   仍不行则退到 disabled（不传 response_format）。
 //   其他错误（401/403/429/超时/模型不存在）不重试，直接返回。
+//
+// 命中 responseFormatCache 时跳过已知会失败的级别，避免每批都重复一次试错。
 func chatWithFallback(
 	ctx context.Context,
 	apiURL, apiKey string,
@@ -148,6 +162,18 @@ func chatWithFallback(
 	req chatCompletionsRequest,
 	fallback []string,
 ) (string, error) {
+	// 命中缓存：把 fallback 从已知成功的 level 开始
+	ck := cacheKey(apiURL, req.Model)
+	if cached, ok := responseFormatCache.Load(ck); ok {
+		cachedLevel, _ := cached.(string)
+		for i, step := range fallback {
+			if step == cachedLevel {
+				fallback = fallback[i:]
+				break
+			}
+		}
+	}
+
 	for _, step := range fallback {
 		req.ResponseFormat = buildResponseFormat(step)
 		raw, _ := json.Marshal(req)
@@ -168,17 +194,17 @@ func chatWithFallback(
 		start := time.Now()
 		resp, err := httpClient.Do(httpReq)
 		if err != nil {
-			logger.Debug("[translate:openai] request error: %v", err)
+			logger.Debug("[translate:openai] request error (response_format=%s): %v", stepLabel, err)
 			return "", fmt.Errorf("openai request: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		logger.Debug("[translate:openai] → HTTP %d (took=%s, bytes=%d, response_format=%s)",
-			resp.StatusCode, time.Since(start), len(body), stepLabel)
+		logger.Debug("[translate:openai] response_format=%s → HTTP %d (took=%s, bytes=%d)",
+			stepLabel, resp.StatusCode, time.Since(start), len(body))
 
 		// 仅 response_format 相关 400 才退到下一级
 		if resp.StatusCode == 400 && strings.Contains(string(body), "response_format") {
-			logger.Debug("[translate:openai] response_format=%s rejected, falling back to next level", stepLabel)
+			logger.Debug("[translate:openai] response_format=%s rejected by API, falling back", stepLabel)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -195,6 +221,13 @@ func chatWithFallback(
 			return "", fmt.Errorf("openai: empty choices")
 		}
 		content := parsed.Choices[0].Message.Content
+
+		// 缓存这个 provider 成功的 response_format 级别（若变化才写）
+		if prev, ok := responseFormatCache.Load(ck); !ok || prev != step {
+			responseFormatCache.Store(ck, step)
+			logger.Debug("[translate:openai] cached response_format=%s for %s/%s", stepLabel, apiURL, req.Model)
+		}
+
 		logger.Debug("[translate:openai] choices[0].message.content len=%d", len(content))
 		return content, nil
 	}
