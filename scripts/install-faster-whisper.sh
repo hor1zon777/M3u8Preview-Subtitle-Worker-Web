@@ -2,8 +2,13 @@
 # install-faster-whisper.sh — 安装 faster-whisper（Python）作为 whisper-cli 替代。
 #
 # 用法：
-#   sudo ./scripts/install-faster-whisper.sh
+#   sudo ./scripts/install-faster-whisper.sh                   # 默认 /opt/whisper-faster-venv
+#   sudo ./scripts/install-faster-whisper.sh /path/to/venv     # 自定义 venv 路径
 #
+# 自动处理：
+#   - 扫描 python3.12 / 3.11 / 3.10 / python3，找第一个 ≥ 3.9 的
+#   - 都太旧？自动加 deadsnakes PPA 装 Python 3.12 → 3.10
+#   - 检测旧 Python 3.8 venv 并自动清掉
 
 set -euo pipefail
 
@@ -16,36 +21,89 @@ BIN_LINK="/usr/local/bin/whisper-cli"
 echo -e "${GREEN}=== faster-whisper 安装脚本 ===${NC}"
 echo ""
 
-# ---------- Python 3 ----------
-if ! command -v python3 &>/dev/null; then
-    echo -e "${RED}未找到 python3，请先安装：sudo apt install -y python3 python3-venv python3-pip${NC}"
-    exit 1
-fi
-PYVER=$(python3 -c 'import sys; vi=sys.version_info; print(f"{vi.major}.{vi.minor}")')
-PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
-PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]; }; then
-    echo "ERROR: need Python >= 3.9 (current $PYVER). faster-whisper requires it."
-    echo "Ubuntu 20.04: sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.10 python3.10-venv python3.10-dev"
-    exit 1
-fi
-echo "[1/4] Python $PYVER OK"
+# ---------- 1. 找一个 ≥ 3.9 的 Python ----------
+PYTHON_BIN=""
+find_python() {
+    for v in 3.12 3.11 3.10 3.9; do
+        if command -v "python${v}" &>/dev/null; then
+            local major minor
+            major=$( "python${v}" -c 'import sys; print(sys.version_info.major)' )
+            minor=$( "python${v}" -c 'import sys; print(sys.version_info.minor)' )
+            if [ "$major" -eq 3 ] && [ "$minor" -ge 9 ]; then
+                PYTHON_BIN="python${v}"
+                return 0
+            fi
+        fi
+    done
+    if command -v python3 &>/dev/null; then
+        local major minor
+        major=$(python3 -c 'import sys; print(sys.version_info.major)')
+        minor=$(python3 -c 'import sys; print(sys.version_info.minor)')
+        if [ "$major" -eq 3 ] && [ "$minor" -ge 9 ]; then
+            PYTHON_BIN="python3"
+            return 0
+        fi
+    fi
+    return 1
+}
 
-# ---------- venv ----------
-echo "[2/4] 创建虚拟环境: $VENV_DIR"
+# ---------- 2. 找不到就装 deadsnakes ----------
+if ! find_python; then
+    echo -e "${YELLOW}未找到 Python ≥ 3.9，尝试从 deadsnakes PPA 安装 ...${NC}"
+    echo ""
+    if [ -f /etc/debian_version ]; then
+        apt-get update -qq
+        apt-get install -y -qq software-properties-common 2>&1 | tail -1
+        add-apt-repository -y ppa:deadsnakes/ppa 2>&1 | tail -3
+        apt-get update -qq
+        for v in 3.12 3.11 3.10; do
+            echo -n "  尝试安装 python${v} ... "
+            if apt-get install -y -qq "python${v}" "python${v}-venv" 2>/dev/null; then
+                PYTHON_BIN="python${v}"
+                echo -e "${GREEN}OK${NC}"
+                break
+            else
+                echo -e "${YELLOW}不可用${NC}"
+            fi
+        done
+    fi
+    if [ -z "$PYTHON_BIN" ]; then
+        echo -e "${RED}无法自动安装 Python ≥ 3.9。手动装：${NC}"
+        echo "  sudo apt update && sudo add-apt-repository -y ppa:deadsnakes/ppa"
+        echo "  sudo apt update && sudo apt install -y python3.10 python3.10-venv"
+        exit 1
+    fi
+fi
+
+PYVER=$( "$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' )
+echo "[1/4] Python 选用 ${PYTHON_BIN} (${PYVER})"
+
+# ---------- 3. 清理由旧 Python 创建的 venv ----------
 if [ -d "$VENV_DIR" ]; then
-    echo -e "${YELLOW}  目录已存在，跳过创建（如需重装请先 rm -rf $VENV_DIR）${NC}"
+    OLD_VER=$( "$VENV_DIR/bin/python3" --version 2>/dev/null | grep -oP '\d+\.\d+' || true )
+    if [ -n "$OLD_VER" ]; then
+        OLD_MINOR=$(echo "$OLD_VER" | cut -d. -f2)
+        if [ "${OLD_MINOR:-0}" -lt 9 ]; then
+            echo -e "${YELLOW}  检测到旧 Python ${OLD_VER} venv，自动清除 ...${NC}"
+            rm -rf "$VENV_DIR"
+        fi
+    fi
+fi
+
+# ---------- 4. 建 venv ----------
+echo "[2/4] 创建虚拟环境: $VENV_DIR (${PYTHON_BIN})"
+if [ ! -d "$VENV_DIR" ]; then
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
 else
-    python3 -m venv "$VENV_DIR"
+    echo -e "${YELLOW}  目录已存在，跳过创建${NC}"
 fi
 source "$VENV_DIR/bin/activate"
 
-# ---------- pip install ----------
+# ---------- 5. pip install ----------
 echo "[3/4] 安装 faster-whisper ..."
 pip install --upgrade pip setuptools wheel 2>&1 | tail -1
 pip install faster-whisper 2>&1 | tail -3
 
-# GPU 检查：有 nvidia-smi 才装 CUDA 包
 if command -v nvidia-smi &>/dev/null; then
     echo "  检测到 N 卡，安装 CUDA 依赖 ..."
     pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 2>&1 | tail -3 || true
@@ -56,47 +114,43 @@ fi
 
 deactivate
 
-# ---------- symlink ----------
+# ---------- 6. symlink ----------
 echo "[4/4] 安装 wrapper → $BIN_LINK"
 if [ -f "$BIN_LINK" ] && [ ! -L "$BIN_LINK" ]; then
     echo -e "${YELLOW}⚠ $BIN_LINK 已存在且不是符号链接。${NC}"
-    echo "  如果是真正的 whisper.cpp 二进制，建议改个名（如 whisper-cli.cpp）再重新运行本脚本。"
-    echo "  本脚本不会覆盖真正的二进制。"
-    echo ""
-    read -r -p "  要不要把它备份成 whisper-cli.cpp.bak 然后继续？[y/N] " ans
+    printf "  把它备份成 whisper-cli.cpp.bak 然后继续？[y/N] "
+    read -r ans
     if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-        sudo mv "$BIN_LINK" "${BIN_LINK}.cpp.bak"
+        mv "$BIN_LINK" "${BIN_LINK}.cpp.bak"
         echo "  已备份 → ${BIN_LINK}.cpp.bak"
     else
-        echo "  跳过。安装完成后手动 ln -sf $WRAPPER_SRC $BIN_LINK"
+        echo "  跳过。手动完成：ln -sf $WRAPPER_SRC $BIN_LINK"
         exit 0
     fi
 fi
 
-# 写入 wrapper 的 shebang 指向 venv python
-cat <<'PYEOF' | sudo tee "$BIN_LINK" >/dev/null
+cat <<PYEOF > "$BIN_LINK"
 #!/usr/bin/env bash
 # Auto-generated by install-faster-whisper.sh
-# This is a trampoline that calls the Python wrapper inside its venv.
 WRAPPER="__WRAPPER_SRC__"
 VENV_PYTHON="__VENV_PYTHON__"
-exec "$VENV_PYTHON" "$WRAPPER" "$@"
+exec "\$VENV_PYTHON" "\$WRAPPER" "\$@"
 PYEOF
-sudo sed -i "s|__WRAPPER_SRC__|$WRAPPER_SRC|" "$BIN_LINK"
-sudo sed -i "s|__VENV_PYTHON__|$VENV_DIR/bin/python3|" "$BIN_LINK"
-sudo chmod +x "$BIN_LINK"
+sed -i "s|__WRAPPER_SRC__|$WRAPPER_SRC|" "$BIN_LINK"
+sed -i "s|__VENV_PYTHON__|$VENV_DIR/bin/python3|" "$BIN_LINK"
+chmod +x "$BIN_LINK"
 
 echo ""
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}  faster-whisper 安装完成！${NC}"
 echo ""
 echo "  wrapper 位置: $BIN_LINK"
-echo "  Python venv:  $VENV_DIR"
+echo "  Python venv:  $VENV_DIR  (${PYTHON_BIN})"
 echo ""
 echo "  验证："
 echo "    $BIN_LINK --help"
 echo ""
-echo "  在 Web UI「系统设置」中确认："
+echo "  Web UI「系统设置」确认："
 echo "    whisper-cli 路径 = whisper-cli（默认 PATH）"
 echo "    使用 CUDA        = 开（有 N 卡时）"
 echo -e "${GREEN}=================================================${NC}"
