@@ -274,7 +274,7 @@ func (s *Server) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWorkerTest(w http.ResponseWriter, r *http.Request) {
 	ok, msg := s.engine.TestConnection(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
+	writeOK(w, map[string]any{"ok": ok, "message": msg})
 }
 
 // --- models ---
