@@ -28,6 +28,7 @@ whisper-cli CLI 兼容 wrapper —— 底层用 faster-whisper。
 """
 
 import argparse, json, os, re, socket, sys
+from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,13 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
     """
     单次 transcribe + 自动 fallback。返回 (seg_count, info, srt_path)。
 
+    防 Whisper 幻觉策略：
+      - condition_on_previous_text=False  关闭跨段上下文（OpenAI Whisper paper §3.7
+        推荐的最有效防幻觉手段；否则一个错的短语会反复传染）
+      - 显式 temperature fallback 列表，让 hallucination 触发时模型自动重试
+      - 若结果中同一短语出现频率 > 30% 且没启用 VAD → 自动用 faster-whisper 默认
+        VAD 参数重跑一次（VAD 会跳过静音段，是消除幻觉的根本手段）
+
       on_progress(pct: int) - 每整数百分点触发
       on_log(msg: str)      - 阶段性诊断
     """
@@ -158,6 +166,17 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
             initial_prompt=prompt or None,
             vad_filter=use_vad,
             vad_parameters=vp if use_vad else None,
+            # ----------------- 防幻觉关键参数 -----------------
+            # 关闭跨段上下文 — 单条错误不会传染后续
+            condition_on_previous_text=False,
+            # 默认 fallback temperature；hallucination 触发时模型重试
+            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            # 压缩比 > 2.4 视为 hallucination
+            compression_ratio_threshold=2.4,
+            # 平均 log-prob < -1.0 视为低置信度
+            log_prob_threshold=-1.0,
+            # 静音概率 > 0.6 跳过
+            no_speech_threshold=0.6,
             **({} if max_ctx <= 0 else {'max_initial_prompt_ctx': max_ctx}),
         )
         emit_log(f"detected lang={info.language} prob={info.language_probability:.2f} "
@@ -165,29 +184,58 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
         total = float(info.duration) or 1.0
         seg_count = 0
         last_pct = -1
+        text_counter = Counter()
         with open(srt_path, 'w', encoding='utf-8') as f:
             for i, seg in enumerate(segments, 1):
                 text = seg.text.strip()
                 if not text:
                     continue
                 seg_count += 1
+                text_counter[text] += 1
                 f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
                 if on_progress:
                     pct = min(99, int(seg.end / total * 100))
                     if pct != last_pct:
                         last_pct = pct
                         on_progress(pct)
-        return seg_count, info, srt_path
+        return seg_count, info, srt_path, text_counter
 
-    seg_count, info, srt_path = run(vad, vad_params)
+    seg_count, info, srt_path, text_counter = run(vad, vad_params)
     if seg_count == 0 and vad:
         emit_log(f"WARN: VAD produced 0 segments (threshold="
                  f"{vad_params.get('threshold') if vad_params else 'n/a'}); "
                  f"retrying without VAD to recover")
-        seg_count, info, srt_path = run(False, None)
+        seg_count, info, srt_path, text_counter = run(False, None)
         if seg_count > 0:
             emit_log(f"recovered {seg_count} segments without VAD — "
                      f"建议在设置中降低 vadThreshold 或关闭 VAD")
+
+    # --- 幻觉检测：同一短语高频出现且未启用 VAD → 重跑一次启用 VAD ---
+    if seg_count >= 5 and text_counter:
+        top_text, top_count = text_counter.most_common(1)[0]
+        ratio = top_count / seg_count
+        if top_count >= 5 and ratio > 0.3:
+            emit_log(f"WARN: hallucination suspected — top phrase '{top_text[:50]}' "
+                     f"appeared {top_count} times ({ratio*100:.0f}% of {seg_count} segments)")
+            if not vad:
+                emit_log("retrying with default-VAD to suppress hallucination ...")
+                # 使用 faster-whisper 默认 VAD 参数（min_silence=2000, threshold=0.5）
+                retry_count, retry_info, retry_path, retry_counter = run(True, None)
+                if retry_count > 0:
+                    # 检查重试结果是否仍有同样幻觉
+                    rt_top_text, rt_top_count = retry_counter.most_common(1)[0]
+                    rt_ratio = rt_top_count / retry_count
+                    if rt_top_count < 5 or rt_ratio <= 0.3:
+                        emit_log(f"recovered {retry_count} segments with default VAD "
+                                 f"(top phrase ratio dropped from {ratio*100:.0f}% to {rt_ratio*100:.0f}%)")
+                        seg_count, info, srt_path = retry_count, retry_info, retry_path
+                    else:
+                        emit_log(f"VAD retry still shows hallucination "
+                                 f"(top {rt_top_count}/{retry_count} = {rt_ratio*100:.0f}%) — "
+                                 f"音频可能本身有大量静音或 BGM，建议检查输入")
+                        # 保留 retry 结果，因为大概率比无 VAD 版本干净
+                        seg_count, info, srt_path = retry_count, retry_info, retry_path
+
     return seg_count, info, srt_path
 
 

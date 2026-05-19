@@ -281,11 +281,7 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	logger.Debug("[worker] [job %s] VTT size=%d sha=%s…", job.JobID, len(vtt), sha[:12])
 	// dump VTT 头部，便于诊断"播放器只显示一条字幕"等问题
 	if len(vtt) > 0 {
-		head := vtt
-		if len(head) > 600 {
-			head = head[:600]
-		}
-		logger.Debug("[worker] [job %s] VTT head:\n%s", job.JobID, string(head))
+		logger.Debug("[worker] [job %s] VTT head:\n%s", job.JobID, vttHead(vtt, 10))
 	}
 	completeCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -402,4 +398,27 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// vttHead 抽取 VTT 字节流的前 N 个 cue（按空行分隔），用于 debug。
+// 按 cue 块边界截断，避免 UTF-8 字符被切半产生乱码。
+func vttHead(vtt []byte, maxCues int) string {
+	s := string(vtt)
+	// 找到第 maxCues 个空行后的位置。VTT 中 cue 之间用空行分隔；
+	// 第一段 "WEBVTT\n\n" 后是第 1 个 cue。
+	pos := 0
+	emptyLineSeen := 0
+	for i := 0; i < len(s)-1; i++ {
+		if s[i] == '\n' && s[i+1] == '\n' {
+			emptyLineSeen++
+			if emptyLineSeen > maxCues {
+				pos = i + 2
+				break
+			}
+		}
+	}
+	if pos == 0 || pos >= len(s) {
+		return s
+	}
+	return s[:pos] + "…"
 }
