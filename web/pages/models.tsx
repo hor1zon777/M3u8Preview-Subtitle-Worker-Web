@@ -91,8 +91,7 @@ export default function ModelsPage() {
             </p>
           </div>
         </div>
-        {engine !== 'faster-whisper' && (
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">下载源</span>
           <Select value={source} onValueChange={(v) => setSource(v as any)}>
             <SelectTrigger className="w-52">
@@ -105,7 +104,6 @@ export default function ModelsPage() {
             </SelectContent>
           </Select>
         </div>
-        )}
       </div>
 
       {catalog.map((cat) => (
