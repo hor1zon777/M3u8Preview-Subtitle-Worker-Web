@@ -85,6 +85,7 @@ func (d *Downloader) Download(ctx context.Context, model string, onProgress Prog
 // downloadFasterWhisper 调 Python wrapper --download-only，模型进 HF cache。
 func (d *Downloader) downloadFasterWhisper(ctx context.Context, model string, onProgress ProgressFn) error {
 	cmd := exec.CommandContext(ctx, d.Wrapper, "--download-only", "-m", model)
+	var stderrBuf strings.Builder
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("wrapper stderr pipe: %w", err)
@@ -92,14 +93,15 @@ func (d *Downloader) downloadFasterWhisper(ctx context.Context, model string, on
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("wrapper start: %w", err)
 	}
-	// scan stderr for progress
+	// 读 stderr 直到 EOF，同时推进度
 	buf := make([]byte, 4096)
 	for {
 		n, err := stderr.Read(buf)
 		if n > 0 {
 			s := string(buf[:n])
+			stderrBuf.WriteString(s)
 			if strings.Contains(s, "downloading model") && onProgress != nil {
-				onProgress(1) // 开始
+				onProgress(1)
 			}
 			if strings.Contains(s, "progress = 100%") && onProgress != nil {
 				onProgress(100)
@@ -110,7 +112,11 @@ func (d *Downloader) downloadFasterWhisper(ctx context.Context, model string, on
 		}
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("wrapper download failed: %w", err)
+		tail := stderrBuf.String()
+		if len(tail) > 1000 {
+			tail = tail[len(tail)-1000:]
+		}
+		return fmt.Errorf("wrapper download failed: %w\nstderr: %s", err, tail)
 	}
 	if onProgress != nil {
 		onProgress(100)

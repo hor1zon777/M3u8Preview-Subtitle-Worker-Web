@@ -93,13 +93,15 @@ def main():
 
     # --- download-only mode ---
     if a.download_only:
-        from huggingface_hub import snapshot_download
-
-        # faster-whisper 的模型是 CT2 格式，HF repo 为 Systran/faster-whisper-<size>
-        if '/' not in model_id:
-            model_id = f"Systran/faster-whisper-{model_id}"
+        # 用 WhisperModel 构造触发下载，利用 faster-whisper 内置的
+        # HF repo 映射（large-v3-turbo → deepdml/..., large-v3 → Systran/...）
+        from faster_whisper import WhisperModel
         print(f"downloading model {model_id} ...", file=sys.stderr, flush=True)
-        snapshot_download(model_id)
+        try:
+            WhisperModel(model_id, device=device, compute_type=compute_type)
+        except Exception as e:
+            print(f"ERROR: download failed: {e}", file=sys.stderr, flush=True)
+            sys.exit(2)
         print("whisper_print_progress_callback: progress = 100%", file=sys.stderr, flush=True)
         sys.exit(0)
 
