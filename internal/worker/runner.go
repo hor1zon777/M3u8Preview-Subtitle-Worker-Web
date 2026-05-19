@@ -279,6 +279,14 @@ func (r *Runner) Run(ctx context.Context, job *broker.ClaimedJob) (retErr error)
 	hasher.Write(vtt)
 	sha := hex.EncodeToString(hasher.Sum(nil))
 	logger.Debug("[worker] [job %s] VTT size=%d sha=%s…", job.JobID, len(vtt), sha[:12])
+	// dump VTT 头部，便于诊断"播放器只显示一条字幕"等问题
+	if len(vtt) > 0 {
+		head := vtt
+		if len(head) > 600 {
+			head = head[:600]
+		}
+		logger.Debug("[worker] [job %s] VTT head:\n%s", job.JobID, string(head))
+	}
 	completeCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if err := r.deps.Client.Complete(completeCtx, job.JobID, broker.CompleteMeta{

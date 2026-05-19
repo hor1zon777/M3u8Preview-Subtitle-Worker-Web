@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,19 +144,47 @@ func (m *Manager) findProvider(id string) (*Provider, error) {
 }
 
 // writeTranslatedSRT 按 template 写 SRT 文件。
+//
+// 排序按 SRT 时间戳里的 start 秒数，确保最终 cue 在文件里按时间单调递增——
+// 很多 HLS / WebVTT 播放器（hls.js / video.js）假设 cue 时间递增，遇到倒退
+// 就会只显示第一条字幕。
 func writeTranslatedSRT(path string, results []TranslationResult, template string) error {
-	sort.SliceStable(results, func(i, j int) bool { return results[i].ID < results[j].ID })
+	sort.SliceStable(results, func(i, j int) bool {
+		return parseSrtStartSeconds(results[i].StartEndTime) < parseSrtStartSeconds(results[j].StartEndTime)
+	})
 
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create translated srt: %w", err)
 	}
 	defer f.Close()
-	for _, r := range results {
+	// 重新分配连续序号（1, 2, 3 ...）以避免 cue id 跳号
+	for i, r := range results {
 		body := RenderContent(template, r.SourceContent, r.TargetContent)
-		fmt.Fprintf(f, "%s\n%s\n%s", r.ID, r.StartEndTime, body)
+		fmt.Fprintf(f, "%d\n%s\n%s", i+1, r.StartEndTime, body)
 	}
 	return nil
+}
+
+// parseSrtStartSeconds 从 "HH:MM:SS,mmm --> HH:MM:SS,mmm" 提取 start 秒数。
+// 解析失败返回 0（保持原顺序）。
+func parseSrtStartSeconds(s string) float64 {
+	// 取 "-->" 之前部分
+	idx := strings.Index(s, "-->")
+	if idx < 0 {
+		return 0
+	}
+	head := strings.TrimSpace(s[:idx])
+	// HH:MM:SS,mmm or HH:MM:SS.mmm
+	head = strings.ReplaceAll(head, ",", ".")
+	parts := strings.Split(head, ":")
+	if len(parts) != 3 {
+		return 0
+	}
+	h, _ := strconv.Atoi(parts[0])
+	m, _ := strconv.Atoi(parts[1])
+	sec, _ := strconv.ParseFloat(parts[2], 64)
+	return float64(h)*3600 + float64(m)*60 + sec
 }
 
 // max int helper (Go 1.21+ 有 max，但保留兼容 ≥1.21)
