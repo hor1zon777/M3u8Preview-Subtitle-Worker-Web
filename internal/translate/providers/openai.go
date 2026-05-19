@@ -6,9 +6,9 @@
 //   - body: {model, messages: [{system}, {user}], temperature: 0.3, stream:false, response_format?}
 //   - structuredOutput: disabled / json_object / json_schema
 //
-// 实现策略：
-//   - texts 数组单元素时（AI 批模式：完整 JSON prompt）→ messages=[system, user]
-//   - texts 多元素时（API 模式不会走 isAi=true 这条路径）→ fallback：每条独立翻译
+// v2：structured output 三级自动回退。
+//   很多兼容厂商不支持 json_schema（DeepSeek / SiliconFlow / 部分中转 API）。
+//   当 API 返回 400 + "response_format" 时自动退一级：json_schema → json_object → disabled。
 package providers
 
 import (
@@ -23,7 +23,7 @@ import (
 	"github.com/hor1zon777/m3u8-preview-subtitle-worker-web/internal/config"
 )
 
-// DefaultUserPrompt / DefaultSystemPrompt 内容固定（与 translate.DefaultSystemPrompt 同步）。
+// 与 TS DefaultSystemPrompt 对齐。
 const defaultSystemPrompt = `你是一位专业字幕翻译专家。请将给定的 ${sourceLanguage} 字幕翻译成 ${targetLanguage}，遵守以下要求：
 
 1. 严格保持原始字幕的编号顺序与时间轴对应关系
@@ -44,8 +44,7 @@ type chatCompletionsRequest struct {
 	Temperature    float64        `json:"temperature"`
 	Stream         bool           `json:"stream"`
 	ResponseFormat map[string]any `json:"response_format,omitempty"`
-	// qwen / dashscope 需要的字段
-	EnableThinking *bool `json:"enable_thinking,omitempty"`
+	EnableThinking *bool          `json:"enable_thinking,omitempty"`
 }
 
 type chatCompletionsResponse struct {
@@ -75,32 +74,14 @@ func OpenAI(ctx context.Context, texts []string, p config.Provider, src, tgt str
 	out := make([]string, len(texts))
 	for i, t := range texts {
 		systemPrompt := renderVars(firstNonEmpty(p.SystemPrompt, defaultSystemPrompt), src, tgt)
-		// 渲染 user prompt 模板（${content}）：t 是已经渲染好的内容
-		userContent := t
 		req := chatCompletionsRequest{
 			Model: firstNonEmpty(p.ModelName, "gpt-4o-mini"),
 			Messages: []chatMessage{
 				{Role: "system", Content: systemPrompt},
-				{Role: "user", Content: userContent},
+				{Role: "user", Content: t},
 			},
 			Temperature: 0.3,
 			Stream:      false,
-		}
-		// structured output 支持
-		switch strings.ToLower(p.StructuredOutput) {
-		case "json_schema":
-			req.ResponseFormat = map[string]any{
-				"type": "json_schema",
-				"json_schema": map[string]any{
-					"name": "translations",
-					"schema": map[string]any{
-						"type":                 "object",
-						"additionalProperties": map[string]string{"type": "string"},
-					},
-				},
-			}
-		case "json_object":
-			req.ResponseFormat = map[string]any{"type": "json_object"}
 		}
 		// qwen / dashscope：禁用思考
 		if strings.Contains(strings.ToLower(p.Type), "qwen") ||
@@ -109,40 +90,100 @@ func OpenAI(ctx context.Context, texts []string, p config.Provider, src, tgt str
 			req.EnableThinking = &no
 		}
 
-		raw, err := json.Marshal(req)
+		// 三级回退：json_schema → json_object → disabled
+		so := strings.ToLower(p.StructuredOutput)
+		fallback := buildFallback(so)
+		content, err := chatWithFallback(ctx, apiURL, p.APIKey, p.CustomParameters, req, fallback)
 		if err != nil {
 			return nil, err
 		}
+		out[i] = content
+	}
+	return out, nil
+}
+
+// buildFallback 把前端选项转成回退链。
+func buildFallback(so string) []string {
+	switch so {
+	case "json_schema":
+		return []string{"json_schema", "json_object", ""}
+	case "json_object":
+		return []string{"json_object", ""}
+	default:
+		return []string{""}
+	}
+}
+
+// buildResponseFormat 按级别构造 response_format。空字符串 = 不传。
+func buildResponseFormat(level string) map[string]any {
+	switch level {
+	case "json_schema":
+		return map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name": "translations",
+				"schema": map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]string{"type": "string"},
+				},
+			},
+		}
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	default:
+		return nil
+	}
+}
+
+// chatWithFallback 逐级尝试 fallback 链：
+//   先 json_schema → API 报 "response_format" 400 则退到 json_object →
+//   仍不行则退到 disabled（不传 response_format）。
+//   其他错误（401/403/429/超时/模型不存在）不重试，直接返回。
+func chatWithFallback(
+	ctx context.Context,
+	apiURL, apiKey string,
+	customParams map[string]any,
+	req chatCompletionsRequest,
+	fallback []string,
+) (string, error) {
+	for _, step := range fallback {
+		req.ResponseFormat = buildResponseFormat(step)
+		raw, _ := json.Marshal(req)
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(raw))
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 		httpReq.Header.Set("Content-Type", "application/json")
-		applyCustomHeaders(httpReq, p.CustomParameters)
+		applyCustomHeaders(httpReq, customParams)
 
 		resp, err := httpClient.Do(httpReq)
 		if err != nil {
-			return nil, fmt.Errorf("openai request: %w", err)
+			return "", fmt.Errorf("openai request: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
+		// 仅 response_format 相关 400 才退到下一级
+		if resp.StatusCode == 400 && strings.Contains(string(body), "response_format") {
+			continue
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("openai HTTP %d: %s", resp.StatusCode, truncate(string(body), 500))
+			return "", fmt.Errorf("openai HTTP %d: %s", resp.StatusCode, truncate(string(body), 500))
 		}
 		var parsed chatCompletionsResponse
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return nil, fmt.Errorf("openai decode: %w", err)
+			return "", fmt.Errorf("openai decode: %w (body=%s)", err, truncate(string(body), 200))
 		}
 		if parsed.Error != nil && parsed.Error.Message != "" {
-			return nil, fmt.Errorf("openai error: %s", parsed.Error.Message)
+			return "", fmt.Errorf("openai error: %s", parsed.Error.Message)
 		}
 		if len(parsed.Choices) == 0 {
-			return nil, fmt.Errorf("openai: empty choices")
+			return "", fmt.Errorf("openai: empty choices")
 		}
-		out[i] = parsed.Choices[0].Message.Content
+		return parsed.Choices[0].Message.Content, nil
 	}
-	return out, nil
+	return "", fmt.Errorf("openai: all response_format fallbacks exhausted")
 }
 
 func renderVars(template, src, tgt string) string {
