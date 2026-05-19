@@ -22,7 +22,14 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 PYVER=$(python3 -c 'import sys; vi=sys.version_info; print(f"{vi.major}.{vi.minor}")')
-echo "[1/4] Python $PYVER 已检测"
+PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
+PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]; }; then
+    echo "ERROR: need Python >= 3.9 (current $PYVER). faster-whisper requires it."
+    echo "Ubuntu 20.04: sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.10 python3.10-venv python3.10-dev"
+    exit 1
+fi
+echo "[1/4] Python $PYVER OK"
 
 # ---------- venv ----------
 echo "[2/4] 创建虚拟环境: $VENV_DIR"
