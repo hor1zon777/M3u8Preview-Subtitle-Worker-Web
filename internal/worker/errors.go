@@ -16,18 +16,24 @@ func ClassifyError(msg string) broker.ErrorKind {
 	// permanent
 	switch {
 	case strings.Contains(lower, "whisper 输出 srt 为空"),
+		strings.Contains(lower, "whisper output srt is empty"),
+		strings.Contains(lower, "srt is empty"),
 		strings.Contains(lower, "transcription=[]"),
-		strings.Contains(lower, "empty transcription"):
+		strings.Contains(lower, "empty transcription"),
+		strings.Contains(lower, "0 segments"):
 		return broker.ErrKindWhisperEmptyTranscription
 	case strings.Contains(lower, "whisper 未生成 srt"),
 		strings.Contains(lower, "model not found"),
 		strings.Contains(lower, "invalid model size"),
 		strings.Contains(lower, "modelspath"),
 		strings.Contains(lower, "cannot find model"),
+		strings.Contains(lower, "whispermodel init failed"),
 		strings.Contains(lower, "no such file") && strings.Contains(lower, "ggml-"):
 		return broker.ErrKindWhisperModelMissing
 	case strings.Contains(lower, "sha256 mismatch"),
-		strings.Contains(lower, "flac size mismatch"):
+		strings.Contains(lower, "flac size mismatch"),
+		strings.Contains(lower, "corrupt input"),
+		strings.Contains(lower, "flate:"):
 		return broker.ErrKindFlacSha256Mismatch
 	case strings.Contains(lower, "401"),
 		strings.Contains(lower, "403"),

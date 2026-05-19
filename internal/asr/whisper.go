@@ -136,10 +136,17 @@ func (w *WhisperRunner) Run(ctx context.Context, workDir string, opts WhisperOpt
 	}
 	if w.Settings.UseVAD {
 		vadModel := filepath.Join(w.Settings.AssetsPath, "ggml-silero-v6.2.0.bin")
+		threshold := w.Settings.VadThreshold
+		if threshold >= 0.9 {
+			logger.Warn("[whisper] vadThreshold=%.2f too strict, clamping to 0.6 (避免 VAD 过滤掉全部语音)", threshold)
+			threshold = 0.6
+		} else if threshold <= 0 {
+			threshold = 0.5
+		}
 		args = append(args,
 			"--vad",
 			"--vad-model", vadModel,
-			"--vad-threshold", strconv.FormatFloat(w.Settings.VadThreshold, 'f', 2, 64),
+			"--vad-threshold", strconv.FormatFloat(threshold, 'f', 2, 64),
 			"--vad-min-speech-duration-ms", strconv.Itoa(w.Settings.VadMinSpeechDuration),
 			"--vad-min-silence-duration-ms", strconv.Itoa(w.Settings.VadMinSilenceDuration),
 			"--vad-speech-pad-ms", strconv.Itoa(w.Settings.VadSpeechPad),

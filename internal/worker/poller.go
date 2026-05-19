@@ -101,17 +101,24 @@ func (p *Poller) loop() {
 	logger.Debug("[worker:poll] loop start (pollInterval=%s baseBackoff=%s maxBackoff=%s waitSec=%d)",
 		baseInterval, backoff, maxBackoff, claimWaitSec)
 
+	// 限流：concurrency saturated 状态每 30s 才输出一次，避免淹没日志
+	var lastSatLog time.Time
+
 	for {
 		if p.ctx.Err() != nil {
 			return
 		}
 		if !p.state.CanClaimNew() {
-			logger.Debug("[worker:poll] cannot claim new (concurrency saturated), sleeping 1s")
+			if time.Since(lastSatLog) > 30*time.Second {
+				logger.Debug("[worker:poll] cannot claim new (concurrency saturated), polling paused")
+				lastSatLog = time.Now()
+			}
 			if sleepCtx(p.ctx, time.Second) != nil {
 				return
 			}
 			continue
 		}
+		lastSatLog = time.Time{}
 
 		// long-poll claim
 		logger.Debug("[worker:poll] claim start (waitSec=%d)", claimWaitSec)
