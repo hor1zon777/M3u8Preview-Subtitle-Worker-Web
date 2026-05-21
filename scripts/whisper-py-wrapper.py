@@ -124,14 +124,26 @@ def resolve_device(no_gpu_flag: bool):
 
 
 def clamp_vad_params(vad_params):
-    """vad-threshold >=0.9 视为异常严格，clamp 到 0.6 避免空输出。"""
+    """
+    防呆 1：vad-threshold >=0.9 视为异常严格，clamp 到 0.6 避免空输出。
+    防呆 2：max_speech_duration_s 未设置 / 过大 时强制兜底 30 秒，避免 silero
+            把超长连续语音段（>60s）整段交给 Whisper，导致 Whisper 在长段里
+            大量判 no_speech 只输出 1 句的"沉默幻觉"。
+    """
     if not vad_params:
-        return vad_params
+        vad_params = {}
+    vad_params = dict(vad_params)
     threshold = vad_params.get('threshold', 0.5)
     if threshold >= 0.9:
         log(f"WARN: vad-threshold={threshold} too strict, clamping to 0.6")
-        vad_params = dict(vad_params)
         vad_params['threshold'] = 0.6
+    max_s = vad_params.get('max_speech_duration_s')
+    if max_s is None or max_s <= 0 or max_s > 60:
+        # silero 默认 inf（永不切长段）；给 30s 兜底
+        if max_s is not None and max_s > 60:
+            log(f"WARN: max_speech_duration_s={max_s}s too long, clamping to 30s "
+                f"(避免 silero 把长段整段丢给 Whisper)")
+        vad_params['max_speech_duration_s'] = 30.0
     return vad_params
 
 
@@ -175,8 +187,9 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
             compression_ratio_threshold=2.4,
             # 平均 log-prob < -1.0 视为低置信度
             log_prob_threshold=-1.0,
-            # 静音概率 > 0.6 跳过
-            no_speech_threshold=0.6,
+            # 静音概率 > 0.8 才跳过（默认 0.6 在 BGM/喘息混合段会把大量
+            # 真实语音判成 no_speech 跳过，导致 long segment 只输出 1 句的"沉默幻觉"）
+            no_speech_threshold=0.8,
             # ----------------- 段切分精度关键参数 -----------------
             # 启用 word-level 时间戳（cross-attention 重对齐）。
             # 关闭时 segment 时间戳来自模型自己的 <|t|> token，遇到不确定段
