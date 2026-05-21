@@ -177,6 +177,13 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
             log_prob_threshold=-1.0,
             # 静音概率 > 0.6 跳过
             no_speech_threshold=0.6,
+            # ----------------- 段切分精度关键参数 -----------------
+            # 启用 word-level 时间戳（cross-attention 重对齐）。
+            # 关闭时 segment 时间戳来自模型自己的 <|t|> token，遇到不确定段
+            # 会"懒人地"匀分时间戳，输出"每 2 秒整一段"这种反自然结果。
+            # 开启后 segment 边界基于真实 word 时间戳，更贴合说话节奏；
+            # 代价：推理时间 +30% 左右。
+            word_timestamps=True,
             **({} if max_ctx <= 0 else {'max_initial_prompt_ctx': max_ctx}),
         )
         emit_log(f"detected lang={info.language} prob={info.language_probability:.2f} "
@@ -185,6 +192,10 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
         seg_count = 0
         last_pct = -1
         text_counter = Counter()
+        # 段时间戳异常检测：若前 N 段出现"恰好等距 + 共享毫秒尾数"模式，
+        # 通常意味着模型在不确定段输出了整数秒匀分时间戳。开启 word_timestamps
+        # 后理论上不应再出现，仍保留诊断 log 以便回归确认。
+        first_segments_dump = []
         with open(srt_path, 'w', encoding='utf-8') as f:
             for i, seg in enumerate(segments, 1):
                 text = seg.text.strip()
@@ -193,11 +204,19 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
                 seg_count += 1
                 text_counter[text] += 1
                 f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
+                if seg_count <= 30:
+                    first_segments_dump.append(
+                        f"  seg[{seg_count:3d}] {seg.start:7.3f}s -> {seg.end:7.3f}s "
+                        f"(len={seg.end - seg.start:5.3f}s) {text[:40]!r}"
+                    )
                 if on_progress:
                     pct = min(99, int(seg.end / total * 100))
                     if pct != last_pct:
                         last_pct = pct
                         on_progress(pct)
+        if first_segments_dump:
+            emit_log(f"first {len(first_segments_dump)} segments (vad={use_vad}):\n"
+                     + "\n".join(first_segments_dump))
         return seg_count, info, srt_path, text_counter
 
     seg_count, info, srt_path, text_counter = run(vad, vad_params)
