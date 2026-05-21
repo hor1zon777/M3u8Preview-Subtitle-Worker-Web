@@ -170,63 +170,152 @@ def do_transcribe(model, wav, of, lang_in, prompt, max_ctx, vad, vad_params,
 
     lang = None if lang_in in ('', 'auto') else lang_in
 
+    # 公共 transcribe 参数（VAD / 输入源单独传）
+    common_kwargs = dict(
+        language=lang,
+        initial_prompt=prompt or None,
+        # 关闭跨段上下文 — 单条错误不会传染后续
+        condition_on_previous_text=False,
+        # 默认 fallback temperature；hallucination 触发时模型重试
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        # 压缩比 > 2.4 视为 hallucination
+        compression_ratio_threshold=2.4,
+        # 平均 log-prob < -1.0 视为低置信度
+        log_prob_threshold=-1.0,
+        # 静音概率 > 0.8 才跳过（默认 0.6 在 BGM/喘息混合段会把大量真实语音
+        # 判成 no_speech 跳过，导致 long segment 只输出 1 句的"沉默幻觉"）
+        no_speech_threshold=0.8,
+        # 启用 word-level 时间戳（cross-attention 重对齐），避免段时间戳被
+        # 模型"懒人地"匀分到整数秒；代价：推理 +30% 左右。
+        word_timestamps=True,
+        **({} if max_ctx <= 0 else {'max_initial_prompt_ctx': max_ctx}),
+    )
+
+    # 简易 segment 结构，用于二次切分时替换原段
+    from collections import namedtuple as _nt
+    _Seg = _nt('Seg', ['start', 'end', 'text'])
+
+    def _resplit_long_segments(seg_list, wav_path, threshold_s):
+        """
+        silero 在找不到低能量停顿点时可能输出 60s+ 长段，Whisper 在长段内
+        attention 退化只输出 1 句话。这里对每个超长段切片重跑 ASR（关 VAD，
+        让 Whisper 用自己的 30s chunk 自切），把结果加上偏移后替换原段。
+        """
+        long_idx = [i for i, s in enumerate(seg_list)
+                    if (s.end - s.start) >= threshold_s]
+        if not long_idx:
+            return seg_list, 0
+        emit_log(f"detected {len(long_idx)} long segment(s) >= {threshold_s}s, "
+                 f"re-running ASR without VAD on each ...")
+
+        # 读 16kHz mono 16-bit PCM WAV 到 ndarray
+        import wave
+        try:
+            import numpy as np
+        except ImportError:
+            emit_log("WARN: numpy unavailable, skip long-segment resplit")
+            return seg_list, 0
+        try:
+            with wave.open(wav_path, 'rb') as f:
+                sr = f.getframerate()
+                sampwidth = f.getsampwidth()
+                nframes = f.getnframes()
+                raw = f.readframes(nframes)
+        except Exception as e:
+            emit_log(f"WARN: cannot read wav for resplit ({e}), skip")
+            return seg_list, 0
+        if sampwidth != 2:
+            emit_log(f"WARN: wav sample width={sampwidth*8}-bit (expected 16-bit), skip resplit")
+            return seg_list, 0
+        all_audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+        new_list = []
+        replaced_total = 0
+        for i, seg in enumerate(seg_list):
+            if i not in long_idx:
+                new_list.append(seg)
+                continue
+            start_s, end_s = seg.start, seg.end
+            audio_slice = all_audio[int(start_s * sr):int(end_s * sr)]
+            try:
+                sub_segs, _ = model.transcribe(
+                    audio_slice,
+                    vad_filter=False,
+                    **common_kwargs,
+                )
+                sub_list = list(sub_segs)
+            except Exception as e:
+                emit_log(f"  resplit [{i}] {start_s:.1f}s->{end_s:.1f}s failed: {e}, keep original")
+                new_list.append(seg)
+                continue
+            kept = []
+            for sub in sub_list:
+                t = (sub.text or '').strip()
+                if not t:
+                    continue
+                kept.append(_Seg(
+                    start=sub.start + start_s,
+                    end=sub.end + start_s,
+                    text=sub.text,
+                ))
+            if not kept:
+                emit_log(f"  resplit [{i}] {start_s:.1f}s->{end_s:.1f}s "
+                         f"(len={end_s-start_s:.1f}s) returned 0 sub-segments, keep original")
+                new_list.append(seg)
+                continue
+            emit_log(f"  resplit [{i}] {start_s:.1f}s->{end_s:.1f}s "
+                     f"(len={end_s-start_s:.1f}s) -> {len(kept)} sub-segments")
+            new_list.extend(kept)
+            replaced_total += 1
+
+        new_list.sort(key=lambda s: s.start)
+        return new_list, replaced_total
+
     def run(use_vad, vp):
         srt_path = f"{of}.srt"
         segments, info = model.transcribe(
             wav,
-            language=lang,
-            initial_prompt=prompt or None,
             vad_filter=use_vad,
             vad_parameters=vp if use_vad else None,
-            # ----------------- 防幻觉关键参数 -----------------
-            # 关闭跨段上下文 — 单条错误不会传染后续
-            condition_on_previous_text=False,
-            # 默认 fallback temperature；hallucination 触发时模型重试
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            # 压缩比 > 2.4 视为 hallucination
-            compression_ratio_threshold=2.4,
-            # 平均 log-prob < -1.0 视为低置信度
-            log_prob_threshold=-1.0,
-            # 静音概率 > 0.8 才跳过（默认 0.6 在 BGM/喘息混合段会把大量
-            # 真实语音判成 no_speech 跳过，导致 long segment 只输出 1 句的"沉默幻觉"）
-            no_speech_threshold=0.8,
-            # ----------------- 段切分精度关键参数 -----------------
-            # 启用 word-level 时间戳（cross-attention 重对齐）。
-            # 关闭时 segment 时间戳来自模型自己的 <|t|> token，遇到不确定段
-            # 会"懒人地"匀分时间戳，输出"每 2 秒整一段"这种反自然结果。
-            # 开启后 segment 边界基于真实 word 时间戳，更贴合说话节奏；
-            # 代价：推理时间 +30% 左右。
-            word_timestamps=True,
-            **({} if max_ctx <= 0 else {'max_initial_prompt_ctx': max_ctx}),
+            **common_kwargs,
         )
         emit_log(f"detected lang={info.language} prob={info.language_probability:.2f} "
                  f"duration={info.duration:.1f}s vad={use_vad}")
         total = float(info.duration) or 1.0
-        seg_count = 0
         last_pct = -1
+
+        # 先 materialize 成 list（generator 触发推理），并保留 _Seg 副本用于
+        # 可能的长段二次切分。
+        seg_list = []
+        for seg in segments:
+            seg_list.append(_Seg(seg.start, seg.end, seg.text))
+            if on_progress:
+                pct = min(99, int(seg.end / total * 100))
+                if pct != last_pct:
+                    last_pct = pct
+                    on_progress(pct)
+
+        # 长段二次切分（仅 wav 为路径时；ndarray 输入不支持二次读文件）
+        if isinstance(wav, str):
+            seg_list, _ = _resplit_long_segments(seg_list, wav, 60.0)
+
+        # 写 SRT + 计数 + dump
+        seg_count = 0
         text_counter = Counter()
-        # 段时间戳异常检测：若前 N 段出现"恰好等距 + 共享毫秒尾数"模式，
-        # 通常意味着模型在不确定段输出了整数秒匀分时间戳。开启 word_timestamps
-        # 后理论上不应再出现，仍保留诊断 log 以便回归确认。
         first_segments_dump = []
         with open(srt_path, 'w', encoding='utf-8') as f:
-            for i, seg in enumerate(segments, 1):
-                text = seg.text.strip()
+            for seg in seg_list:
+                text = (seg.text or '').strip()
                 if not text:
                     continue
                 seg_count += 1
                 text_counter[text] += 1
-                f.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
+                f.write(f"{seg_count}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
                 if seg_count <= 30:
                     first_segments_dump.append(
                         f"  seg[{seg_count:3d}] {seg.start:7.3f}s -> {seg.end:7.3f}s "
                         f"(len={seg.end - seg.start:5.3f}s) {text[:40]!r}"
                     )
-                if on_progress:
-                    pct = min(99, int(seg.end / total * 100))
-                    if pct != last_pct:
-                        last_pct = pct
-                        on_progress(pct)
         if first_segments_dump:
             emit_log(f"first {len(first_segments_dump)} segments (vad={use_vad}):\n"
                      + "\n".join(first_segments_dump))
