@@ -36,6 +36,77 @@ const DEFAULT: SystemSettings = {
   webToken: '',
 };
 
+// VAD 预设方案。覆盖 6 个参数；不动 useVAD。
+type VadPreset = {
+  id: string;
+  name: string;
+  desc: string;
+  values: Pick<
+    SystemSettings,
+    | 'vadThreshold'
+    | 'vadMinSpeechDuration'
+    | 'vadMinSilenceDuration'
+    | 'vadMaxSpeechDuration'
+    | 'vadSpeechPad'
+    | 'vadSamplesOverlap'
+  >;
+};
+
+const VAD_PRESETS: VadPreset[] = [
+  {
+    id: 'default',
+    name: '默认（whisper 官方推荐）',
+    desc: '通用场景；新手优先用这个',
+    values: {
+      vadThreshold: 0.5,
+      vadMinSpeechDuration: 250,
+      vadMinSilenceDuration: 100,
+      vadMaxSpeechDuration: 0,
+      vadSpeechPad: 30,
+      vadSamplesOverlap: 0.1,
+    },
+  },
+  {
+    id: 'av_dense',
+    name: '影视 / AV（密集对话）',
+    desc: '低阈值多收人声；填补口齿不清；长段落不切',
+    values: {
+      vadThreshold: 0.35,
+      vadMinSpeechDuration: 150,
+      vadMinSilenceDuration: 300,
+      vadMaxSpeechDuration: 0,
+      vadSpeechPad: 300,
+      vadSamplesOverlap: 0.1,
+    },
+  },
+  {
+    id: 'meeting',
+    name: '会议 / 讲座（长停顿）',
+    desc: '阈值高一点过滤背景噪音；强制每 30s 切段防幻觉',
+    values: {
+      vadThreshold: 0.5,
+      vadMinSpeechDuration: 300,
+      vadMinSilenceDuration: 500,
+      vadMaxSpeechDuration: 30000,
+      vadSpeechPad: 200,
+      vadSamplesOverlap: 0.1,
+    },
+  },
+  {
+    id: 'noisy',
+    name: '嘈杂环境（音乐 / 背景噪音）',
+    desc: '阈值最高，只识别明显人声，少误检',
+    values: {
+      vadThreshold: 0.7,
+      vadMinSpeechDuration: 300,
+      vadMinSilenceDuration: 200,
+      vadMaxSpeechDuration: 0,
+      vadSpeechPad: 50,
+      vadSamplesOverlap: 0.15,
+    },
+  },
+];
+
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [s, setS] = useState<SystemSettings>(DEFAULT);
@@ -183,7 +254,27 @@ export default function SettingsPage() {
             <Label htmlFor="useVAD" className="text-sm">启用 VAD（过滤静音段，节省 ASR 时间）</Label>
           </div>
           {s.useVAD && (
-            <div className="grid grid-cols-2 gap-3">
+            <>
+              {/* 预设按钮 */}
+              <div className="flex flex-wrap gap-2">
+                {VAD_PRESETS.map((p) => (
+                  <Button
+                    key={p.id}
+                    variant="outline"
+                    size="sm"
+                    title={p.desc}
+                    onClick={() => {
+                      // 一次更新所有 VAD 参数字段
+                      setS((prev) => ({ ...prev, ...p.values }));
+                    }}
+                  >
+                    {p.name}
+                  </Button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">一键加载预设参数，也可自由组合再微调。</p>
+
+              <div className="grid grid-cols-2 gap-3">
               <NumField label="threshold (0-1)" value={s.vadThreshold}
                 onChange={(v) => update('vadThreshold', v)} step={0.1} min={0} max={1} />
               <NumField label="min speech ms" value={s.vadMinSpeechDuration}
@@ -197,6 +288,7 @@ export default function SettingsPage() {
               <NumField label="samples overlap (0-1)" value={s.vadSamplesOverlap}
                 onChange={(v) => update('vadSamplesOverlap', v)} step={0.05} min={0} max={1} />
             </div>
+          </>
           )}
         </CardContent>
       </Card>

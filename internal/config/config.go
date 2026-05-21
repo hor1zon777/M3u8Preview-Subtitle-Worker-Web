@@ -168,10 +168,8 @@ func (c *Config) EnsureDefaults(dataDir string) {
 	if c.Worker.SourceLanguage == "" {
 		c.Worker.SourceLanguage = def.SourceLanguage
 	}
-	if c.Worker.WhisperMaxContext == 0 {
-		// 0 不是合理默认；TS 里 -1 表示"用 whisper 默认"
-		c.Worker.WhisperMaxContext = def.WhisperMaxContext
-	}
+	// WhisperMaxContext：-1 = 用 whisper 默认；任何 >= 0 的值都尊重用户设置。
+	// 旧版本曾把 0 视作"未设置"重置为 -1，导致用户保存的值在下次启动时被吞掉，已移除。
 
 	defSys := DefaultSystemSettings(dataDir)
 	if c.Settings.ModelsPath == "" {

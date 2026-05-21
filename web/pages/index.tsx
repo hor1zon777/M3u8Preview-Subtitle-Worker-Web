@@ -545,14 +545,19 @@ export default function WorkerPage() {
                 min={-1}
                 max={32768}
                 value={settings.whisperMaxContext}
-                onChange={(e) =>
+                onChange={(e) => {
+                  // 空串保持 -1，避免被 Number("") === 0 吞掉用户的"清空"动作
+                  const raw = e.target.value;
+                  if (raw === '' || raw === '-') {
+                    update('whisperMaxContext', -1);
+                    return;
+                  }
+                  const n = Number(raw);
                   update(
                     'whisperMaxContext',
-                    Number.isFinite(Number(e.target.value))
-                      ? Math.floor(Number(e.target.value))
-                      : -1,
-                  )
-                }
+                    Number.isFinite(n) ? Math.floor(n) : -1,
+                  );
+                }}
               />
               <p className="text-xs text-muted-foreground mt-1">-1 表示用 whisper 默认值。</p>
             </Field>
